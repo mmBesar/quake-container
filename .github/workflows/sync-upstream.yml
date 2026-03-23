@@ -8,21 +8,21 @@ on:
 jobs:
   sync-upstream:
     name: Sync upstream to local upstream branch
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       actions: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Add upstream remote and fetch
         run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git config user.name "${{ github.repository_owner }}"
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
           git remote add upstream https://github.com/Novum/vkQuake.git
           git fetch upstream --tags --force
 
