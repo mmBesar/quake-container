@@ -37,12 +37,12 @@ jobs:
 
     steps:
       - name: Checkout main branch (Dockerfile, entrypoint.sh)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: main
 
       - name: Checkout upstream source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.image_tag || 'upstream' }}
           path: upstream-src
