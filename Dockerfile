@@ -78,6 +78,9 @@ EXPOSE 26000/udp
 
 # =============================================================================
 # Environment variables with defaults
+# Note: QUAKE_ADMIN_PASSWORD is intentionally NOT set here.
+#       Always pass it at runtime via .env or docker-compose to avoid
+#       baking secrets into the image.
 # =============================================================================
 ENV \
     # --- Server identity ---
@@ -103,9 +106,6 @@ ENV \
     \
     # --- Map settings ---
     QUAKE_MAP="start" \
-    \
-    # --- Admin ---
-    QUAKE_ADMIN_PASSWORD="" \
     \
     # --- Bots (Frogbot v2) ---
     # Set to 1 to enable Frogbot mod, 0 for vanilla server
