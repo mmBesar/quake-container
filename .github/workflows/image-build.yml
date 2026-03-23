@@ -3,27 +3,16 @@ name: Build and Publish vkQuake Server Container
 on:
   workflow_dispatch:
     inputs:
-      force_build:
-        description: 'Force build even if no changes'
-        required: false
-        default: false
-        type: boolean
       image_tag:
-        description: 'Custom image tag (default: auto-generated from git tag)'
-        required: false
-        default: ''
+        description: 'Tag to build (e.g. 1.33.1)'
+        required: true
         type: string
   push:
     branches:
-      - upstream
+      - main
     paths:
-      - 'src/**'
-      - 'Makefile'
       - 'Dockerfile'
-      - 'start.sh'
-      - '.github/workflows/image-build.yml'
-  schedule:
-    - cron: '0 2 * * *'
+      - 'entrypoint.sh'
 
 permissions:
   contents: read
@@ -31,170 +20,130 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: ghcr.io/mmbesar/quake-container
 
 jobs:
-  check-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
-      image_tag: ${{ steps.check.outputs.image_tag }}
-      git_tag: ${{ steps.check.outputs.git_tag }}
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
 
-    - name: Check for changes or triggers
-      id: check
-      run: |
-        # Get the latest tag from upstream by creation date
-        GIT_TAG=$(git tag --sort=-creatordate | head -n1)
-        
-        # If no tag found, use commit SHA
-        if [[ -z "$GIT_TAG" ]]; then
-          GIT_TAG="sha-$(git rev-parse --short HEAD)"
-        fi
-        
-        echo "git_tag=$GIT_TAG" >> $GITHUB_OUTPUT
-        
-        # Determine image tag
-        if [[ -n "${{ github.event.inputs.image_tag }}" ]]; then
-          IMAGE_TAG="${{ github.event.inputs.image_tag }}"
-        else
-          IMAGE_TAG="$GIT_TAG"
-        fi
-        
-        echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-        
-        # Check if this is a manual trigger
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-          echo "Manual trigger detected"
-          echo "should_build=true" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-        
-        # Check if this is a push event
-        if [[ "${{ github.event_name }}" == "push" ]]; then
-          echo "Push event detected"
-          echo "should_build=true" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-        
-        # For scheduled runs, check if image already exists
-        echo "Checking if image already exists for tag: $IMAGE_TAG"
-        
-        # Login to registry to check if image exists
-        echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
-        
-        # Check if image exists
-        if docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG >/dev/null 2>&1; then
-          echo "Image for $IMAGE_TAG already exists"
-          echo "should_build=false" >> $GITHUB_OUTPUT
-        else
-          echo "No image found for $IMAGE_TAG, should build"
-          echo "should_build=true" >> $GITHUB_OUTPUT
-        fi
+      - name: Checkout upstream source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.image_tag || 'upstream' }}
+          path: upstream-src
 
-  build-and-push:
-    needs: check-changes
-    if: needs.check-changes.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+      - name: Prepare build context
+        run: |
+          cp -r upstream-src/* .
+          ls -la Dockerfile entrypoint.sh
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push image by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge and push multi-arch manifest
+    runs-on: ubuntu-24.04
+    needs: build
+
     steps:
-    - name: Checkout main for Dockerfile
-      uses: actions/checkout@v4
-      with:
-        ref: main
-        path: main
+      - name: Download AMD64 digest
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-amd64
+          path: /tmp/digests
 
-    - name: Checkout upstream for source
-      uses: actions/checkout@v4
-      with:
-        ref: upstream
-        path: upstream
+      - name: Download ARM64 digest
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-arm64
+          path: /tmp/digests
 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
-    - name: Login to Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate tags
+        id: tags
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        tags: |
-          type=raw,value=latest
-          type=raw,value=${{ needs.check-changes.outputs.image_tag }}
-          type=raw,value=${{ needs.check-changes.outputs.git_tag }}
-        labels: |
-          org.opencontainers.image.title=vkQuake Dedicated Server
-          org.opencontainers.image.description=Containerized vkQuake dedicated server with full configuration control
-          org.opencontainers.image.vendor=mmBesar
-          org.opencontainers.image.licenses=GPL-2.0
-          org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/README.md
-          org.opencontainers.image.revision=${{ github.sha }}
-          org.opencontainers.image.version=${{ needs.check-changes.outputs.git_tag }}
+          # Always include latest
+          TAGS="${{ env.IMAGE_NAME }}:latest"
 
-    - name: Prepare build context
-      run: |
-        # Copy Dockerfile from main branch
-        cp main/Dockerfile .
-        # Copy Dockerfile from main branch
-        cp main/start.sh .
-        # Copy source from upstream
-        cp -r upstream/* .
-        # Ensure we have the Dockerfile in the build context
-        ls -la Dockerfile
+          # If we have a semver tag, also add version and minor tags
+          if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            MINOR=$(echo "$TAG" | cut -d. -f1,2)
+            TAGS="$TAGS,${{ env.IMAGE_NAME }}:${TAG},${{ env.IMAGE_NAME }}:${MINOR}"
+          fi
 
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        build-args: |
-          BUILDKIT_INLINE_CACHE=1
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "Generated tags: $TAGS"
 
-    - name: Create GitHub Release
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ needs.check-changes.outputs.git_tag }}
-        release_name: Quake II Server ${{ needs.check-changes.outputs.git_tag }}
-        body: |
-          ## vkQuake Dedicated Server Container
-          
-          Multi-architecture container image for vkQuake dedicated server.
-          
-          ### Usage
-          ```bash
-          docker pull ghcr.io/mmbesar/quake:latest
-          ```
-          
-          ### Supported Architectures
-          - linux/amd64
-          - linux/arm64
+      - name: Create and push multi-arch manifest
+        run: |
+          # Build the digest arguments
+          DIGESTS=$(ls /tmp/digests | xargs -I{} echo "${{ env.IMAGE_NAME }}@sha256:{}")
 
-        draft: false
-        prerelease: false
+          # Create comma-separated tag arguments
+          TAG_ARGS=$(echo "${{ steps.tags.outputs.tags }}" | tr ',' '\n' | xargs -I{} echo "--tag {}" | tr '\n' ' ')
 
-    - name: Image digest
-      run: echo "Image built and pushed successfully!"
+          docker buildx imagetools create $TAG_ARGS $DIGESTS
+
+      - name: Inspect final manifest
+        run: |
+          docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:latest
