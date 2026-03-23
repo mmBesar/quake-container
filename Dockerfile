@@ -6,15 +6,13 @@ FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install build dependencies (from upstream's official docs)
+# Install build dependencies (from upstream's official build system)
 RUN apt-get update && apt-get install -y \
     meson \
     ninja-build \
     gcc \
     g++ \
     pkg-config \
-    curl \
-    git \
     glslang-tools \
     spirv-tools \
     libsdl2-dev \
@@ -34,48 +32,7 @@ RUN meson setup build && \
     strip build/vkquake
 
 # =============================================================================
-# Stage 2: Fetch Frogbot v2 (latest release)
-# progs.dat from release archive + configs from repo at same tag
-# =============================================================================
-FROM ubuntu:24.04 AS frogbot
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y \
-    curl \
-    git \
-    jq \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /frogbot
-
-RUN \
-    # Get latest release info from GitHub API
-    RELEASE=$(curl -sf https://api.github.com/repos/DrLex0/quake-frogbots/releases/latest) && \
-    TAG=$(echo "$RELEASE" | jq -r '.tag_name') && \
-    DOWNLOAD_URL=$(echo "$RELEASE" | jq -r '.assets[0].browser_download_url') && \
-    echo "Fetching Frogbot $TAG from $DOWNLOAD_URL" && \
-    \
-    # Download and extract prebuilt progs.dat
-    curl -sL "$DOWNLOAD_URL" -o frogbot-progs.tgz && \
-    tar -xzf frogbot-progs.tgz && \
-    \
-    # Clone repo at same tag for configs, sounds
-    git clone --depth 1 --branch "$TAG" https://github.com/DrLex0/quake-frogbots.git repo && \
-    \
-    # Assemble frogbot game directory
-    mkdir -p /frogbot/game && \
-    cp Release/quake/progs.dat     /frogbot/game/ && \
-    cp repo/frogbot-quake.cfg      /frogbot/game/ && \
-    cp -r repo/configs-quake       /frogbot/game/ && \
-    cp -r repo/sound               /frogbot/game/ && \
-    \
-    # autoexec.cfg: loads frogbot config first, then our env-var overrides
-    # are injected at runtime by entrypoint.sh
-    echo "exec frogbot-quake.cfg" > /frogbot/game/autoexec.cfg
-
-# =============================================================================
-# Stage 3: Runtime image
+# Stage 2: Runtime image
 # =============================================================================
 FROM ubuntu:24.04
 
@@ -104,11 +61,11 @@ RUN groupadd -r quake && useradd -r -g quake quake
 RUN mkdir -p /quake/{bin,game,config,logs} && \
     chown -R quake:quake /quake
 
-# Copy vkQuake binary from builder
+# Copy vkQuake binary from builder stage
 COPY --from=builder --chown=quake:quake /build/build/vkquake /quake/bin/vkquake
 
-# Copy Frogbot game directory from frogbot stage
-COPY --from=frogbot --chown=quake:quake /frogbot/game /quake/game/frogbot
+# Copy Frogbot game directory (prepared by image-build.yml before docker build)
+COPY --chown=quake:quake frogbot/ /quake/game/frogbot/
 
 # Copy entrypoint script
 COPY --chown=quake:quake entrypoint.sh /quake/entrypoint.sh
