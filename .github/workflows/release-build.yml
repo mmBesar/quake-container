@@ -1,0 +1,162 @@
+name: Build vkQuake with Fixed Port
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (leave empty for latest)'
+        required: false
+#   push:
+#     branches:
+#       - upstream
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: upstream
+          fetch-depth: 0
+
+      - name: Get version info
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          else
+            TAG=$(git tag --sort=-version:refname | head -n1)
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          fi
+          
+          # Get version from source files (like upstream does)
+          BASE_VERSION=$(grep -oP "^#define\s*VKQUAKE_VERSION\s*\K[0-9.]*" Quake/quakever.h)
+          PATCH_VERSION=$(grep -oP "^#define\s*VKQUAKE_VER_PATCH\s*\K[0-9.]*" Quake/quakever.h)
+          SUFFIX=$(grep -oP "^#define\s*VKQUAKE_VER_SUFFIX\s*\"\K([^\"]*)" Quake/quakever.h || echo "")
+          VERSION="${BASE_VERSION}.${PATCH_VERSION}${SUFFIX}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          echo "Building tag: $TAG"
+          echo "Version: $VERSION"
+
+      - name: Apply port fix
+        run: |
+          # Apply the port fix to net_udp.c
+          sed -i 's/address\.sin_port = htons ((unsigned short)port);/if (port == 0) port = 57613;\n\taddress.sin_port = htons ((unsigned short)port);/' Quake/net_udp.c
+          
+          # Verify the change was applied
+          echo "=== Port fix applied ==="
+          grep -A2 -B2 "port = 57613" Quake/net_udp.c || echo "Fix not found - checking context:"
+          grep -A5 -B5 "sin_port.*htons" Quake/net_udp.c
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: Packaging/AppImage/docker
+          platforms: linux/amd64
+          tags: build-vkquake
+          load: true
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha
+
+      - name: Build vkQuake using upstream system
+        run: |
+          # Make the script executable
+          chmod +x Packaging/AppImage/run-in-docker.sh
+          
+          # Build using the upstream Docker system with our fixed version
+          docker run --rm --privileged \
+            -e VERSION=${{ steps.get_version.outputs.version }}-port-fixed \
+            -v "$PWD:/usr/src/vkQuake" \
+            build-vkquake /usr/src/vkQuake/Packaging/AppImage/run-in-docker.sh
+
+      - name: Prepare release files
+        run: |
+          cd Packaging/AppImage
+          
+          # Find the generated files
+          ARCHIVE=$(ls vkquake-*-port-fixed_linux64.tar.gz)
+          APPIMAGE=$(ls vkquake-*-port-fixed-x86_64.AppImage)
+          
+          # Rename to match our tag
+          TAG="${{ steps.get_version.outputs.tag }}"
+          mv "$ARCHIVE" "vkquake-${TAG}-linux-amd64.tar.gz"
+          mv "$APPIMAGE" "vkquake-${TAG}-linux-amd64.AppImage"
+          
+          # List what we have
+          echo "=== Generated files ==="
+          ls -la vkquake-${TAG}-*
+          
+          # Move to workspace root for upload
+          mv vkquake-${TAG}-* ../../
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.tag }}
+          name: vkQuake ${{ steps.get_version.outputs.tag }} (Fixed Port)
+          body: |
+            vkQuake ${{ steps.get_version.outputs.tag }} with fixed client port 57613
+            
+            **Changes:**
+            - Client always uses UDP port 57613 instead of random ports
+            - Built using upstream's proven Docker build system
+            - Includes both AppImage and tar.gz formats for Linux x86_64
+            
+            **Files:**
+            - `vkquake-${{ steps.get_version.outputs.tag }}-linux-amd64.AppImage` - Portable AppImage format
+            - `vkquake-${{ steps.get_version.outputs.tag }}-linux-amd64.tar.gz` - Traditional archive with binary and license
+            
+            **Installation:**
+            - AppImage: Download, make executable (`chmod +x`), and run
+            - tar.gz: Extract and run the `vkquake` binary
+          files: |
+            vkquake-${{ steps.get_version.outputs.tag }}-linux-amd64.AppImage
+            vkquake-${{ steps.get_version.outputs.tag }}-linux-amd64.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Optional: Build ARM64 using cross-compilation in the same Docker environment
+  build-arm64:
+    runs-on: ubuntu-latest
+    if: false  # Disable for now, enable when needed
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: upstream
+          fetch-depth: 0
+
+      - name: Get version info
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          else
+            TAG=$(git tag --sort=-version:refname | head -n1)
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Apply port fix
+        run: |
+          sed -i 's/address\.sin_port = htons ((unsigned short)port);/if (port == 0) port = 57613;\n\taddress.sin_port = htons ((unsigned short)port);/' Quake/net_udp.c
+
+      - name: Build ARM64 (manual cross-compilation)
+        run: |
+          # This would need a custom Docker setup for ARM64 cross-compilation
+          # For now, focus on getting x86_64 working first
+          echo "ARM64 build disabled - focus on x86_64 first"
