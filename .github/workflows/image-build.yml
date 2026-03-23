@@ -36,7 +36,7 @@ jobs:
             runner: ubuntu-24.04-arm
 
     steps:
-      - name: Checkout main branch
+      - name: Checkout main branch (Dockerfile, entrypoint.sh)
         uses: actions/checkout@v4
         with:
           ref: main
@@ -47,10 +47,39 @@ jobs:
           ref: ${{ github.event.inputs.image_tag || 'upstream' }}
           path: upstream-src
 
-      - name: Prepare build context
+      - name: Prepare vkQuake source in build context
         run: |
           cp -r upstream-src/* .
-          ls -la Dockerfile entrypoint.sh
+
+      - name: Download Frogbot (latest release)
+        run: |
+          # Fetch latest release info
+          RELEASE=$(curl -sf https://api.github.com/repos/DrLex0/quake-frogbots/releases/latest)
+          TAG=$(echo "$RELEASE" | jq -r '.tag_name')
+          DOWNLOAD_URL=$(echo "$RELEASE" | jq -r '.assets[0].browser_download_url')
+
+          echo "Fetching Frogbot $TAG"
+
+          # Download prebuilt progs archive
+          curl -sL "$DOWNLOAD_URL" -o frogbot-progs.tgz
+          tar -xzf frogbot-progs.tgz
+
+          # Clone repo at same tag for configs and sounds
+          git clone --depth 1 --branch "$TAG" https://github.com/DrLex0/quake-frogbots.git frogbot-repo
+
+          # Assemble frogbot/ directory for COPY in Dockerfile
+          mkdir -p frogbot
+          cp Release/quake/progs.dat        frogbot/
+          cp frogbot-repo/frogbot-quake.cfg frogbot/
+          cp -r frogbot-repo/configs-quake  frogbot/
+          cp -r frogbot-repo/sound          frogbot/
+
+          # autoexec.cfg loads frogbot config first
+          # entrypoint.sh then overrides with env vars via server.cfg
+          echo "exec frogbot-quake.cfg" > frogbot/autoexec.cfg
+
+          echo "Frogbot $TAG ready"
+          ls -la frogbot/
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -125,7 +154,7 @@ jobs:
           # Always include latest
           TAGS="${{ env.IMAGE_NAME }}:latest"
 
-          # If we have a semver tag, also add version and minor tags
+          # Add version and minor tags if semver
           if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             MINOR=$(echo "$TAG" | cut -d. -f1,2)
             TAGS="$TAGS,${{ env.IMAGE_NAME }}:${TAG},${{ env.IMAGE_NAME }}:${MINOR}"
@@ -136,12 +165,8 @@ jobs:
 
       - name: Create and push multi-arch manifest
         run: |
-          # Build the digest arguments
           DIGESTS=$(ls /tmp/digests | xargs -I{} echo "${{ env.IMAGE_NAME }}@sha256:{}")
-
-          # Create comma-separated tag arguments
           TAG_ARGS=$(echo "${{ steps.tags.outputs.tags }}" | tr ',' '\n' | xargs -I{} echo "--tag {}" | tr '\n' ' ')
-
           docker buildx imagetools create $TAG_ARGS $DIGESTS
 
       - name: Inspect final manifest
