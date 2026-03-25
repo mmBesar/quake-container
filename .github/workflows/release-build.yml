@@ -10,23 +10,35 @@ on:
 permissions:
   contents: write
 
+# ===========================================================================
+# Shared steps are extracted via reusable logic in each job.
+# Three parallel build jobs feed one unified release job.
+#
+# AMD64  → upstream Docker build system → AppImage + tar.gz
+# ARM64  → native ubuntu-24.04-arm runner → tar.gz
+# RISCV64 → cross-compile on ubuntu-24.04 AMD64 runner → tar.gz
+# ===========================================================================
+
 jobs:
 
   # ===========================================================================
-  # AMD64: uses upstream's proven Docker build system → AppImage + tar.gz
+  # AMD64: upstream Docker build system → AppImage + tar.gz
   # ===========================================================================
   build-amd64:
     name: Build amd64
     runs-on: ubuntu-24.04
 
+    outputs:
+      tag: ${{ steps.get_version.outputs.tag }}
+
     steps:
-      - name: Checkout code
+      - name: Checkout upstream branch
         uses: actions/checkout@v6
         with:
           ref: upstream
           fetch-depth: 0
 
-      - name: Set git identity to repo owner
+      - name: Set git identity
         run: |
           git config user.name "${{ github.repository_owner }}"
           git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
@@ -46,7 +58,6 @@ jobs:
           SUFFIX=$(grep -oP "^#define\s*VKQUAKE_VER_SUFFIX\s*\"\K([^\"]*)" Quake/quakever.h || echo "")
           VERSION="${BASE_VERSION}.${PATCH_VERSION}${SUFFIX}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-
           echo "Building tag: $TAG / Version: $VERSION"
 
       - name: Apply port fix
@@ -68,8 +79,8 @@ jobs:
           tags: build-vkquake
           load: true
           push: false
-          cache-from: type=gha,scope=amd64
-          cache-to: type=gha,scope=amd64
+          cache-from: type=gha,scope=upstream-docker
+          cache-to: type=gha,scope=upstream-docker,mode=max
 
       - name: Build vkQuake using upstream system
         run: |
@@ -91,7 +102,6 @@ jobs:
           mv "$ARCHIVE"  "vkquake-${TAG}-linux-amd64.tar.gz"
           mv "$APPIMAGE" "vkquake-${TAG}-linux-amd64.AppImage"
 
-          echo "=== Generated files ==="
           ls -la vkquake-${TAG}-*
           mv vkquake-${TAG}-* ../../
 
@@ -106,21 +116,20 @@ jobs:
           retention-days: 1
 
   # ===========================================================================
-  # ARM64: builds natively on ubuntu-24.04-arm using meson/ninja
-  # Produces a tar.gz (AppImage tooling is x86_64 only)
+  # ARM64: native runner → meson/ninja → tar.gz
   # ===========================================================================
   build-arm64:
     name: Build arm64
     runs-on: ubuntu-24.04-arm
 
     steps:
-      - name: Checkout code
+      - name: Checkout upstream branch
         uses: actions/checkout@v6
         with:
           ref: upstream
           fetch-depth: 0
 
-      - name: Set git identity to repo owner
+      - name: Set git identity
         run: |
           git config user.name "${{ github.repository_owner }}"
           git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
@@ -138,49 +147,47 @@ jobs:
 
       - name: Apply port fix
         run: |
-          # Surgical fix: only the control socket init call gets port 57613
-          # Avoids double-bind crash when connecting to a server
           sed -i 's/net_controlsocket4 = UDP4_OpenSocket (0)/net_controlsocket4 = UDP4_OpenSocket (57613)/' Quake/net_udp.c
           echo "=== Port fix applied ==="
           grep -A1 -B1 "57613" Quake/net_udp.c
 
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-arm64-${{ hashFiles('.github/workflows/release-build.yml') }}
+
       - name: Install build dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y \
-            meson \
-            ninja-build \
-            gcc \
-            g++ \
-            pkg-config \
-            glslang-tools \
-            spirv-tools \
-            libsdl2-dev \
-            libvulkan-dev \
-            libvorbis-dev \
-            libmpg123-dev \
-            libflac-dev \
-            libopusfile-dev \
-            libx11-xcb-dev \
-            && sudo rm -rf /var/lib/apt/lists/*
+            meson ninja-build gcc g++ pkg-config \
+            glslang-tools spirv-tools \
+            libsdl2-dev libvulkan-dev libvorbis-dev \
+            libmpg123-dev libflac-dev libopusfile-dev \
+            libx11-xcb-dev
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Cache meson build
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: meson-arm64-${{ hashFiles('Quake/**') }}
+          restore-keys: meson-arm64-
 
       - name: Build vkQuake
         run: |
-          meson setup build
-          ninja -C build
+          meson setup build || meson setup --wipe build
+          ninja -C build -j$(nproc)
           strip build/vkquake
 
       - name: Package release
         run: |
           TAG="${{ steps.get_version.outputs.tag }}"
           FOLDER="vkquake-${TAG}-linux-arm64"
-
           mkdir -p "$FOLDER"
           cp build/vkquake "$FOLDER/"
           cp LICENSE.txt "$FOLDER/"
-
           tar -czf "${FOLDER}.tar.gz" "$FOLDER"
-
-          echo "=== Generated files ==="
           ls -la ${FOLDER}.tar.gz
 
       - name: Upload artifact
@@ -192,21 +199,167 @@ jobs:
           retention-days: 1
 
   # ===========================================================================
-  # Create unified GitHub Release with all arch files
+  # RISC-V 64: cross-compile on AMD64 runner → tar.gz
+  # Targets generic rv64gc — works on Orange Pi RV2, VisionFive 2, Milk-V, etc.
+  # Note: Vulkan drivers on RISC-V are still maturing; binary is ready for when
+  # they land. Single-player software rendering works today.
   # ===========================================================================
-  release:
-    name: Create GitHub Release
+  build-riscv64:
+    name: Build riscv64
     runs-on: ubuntu-24.04
-    needs: [build-amd64, build-arm64]
 
     steps:
-      - name: Checkout code
+      - name: Checkout upstream branch
         uses: actions/checkout@v6
         with:
           ref: upstream
           fetch-depth: 0
 
-      - name: Set git identity to repo owner
+      - name: Set git identity
+        run: |
+          git config user.name "${{ github.repository_owner }}"
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+      - name: Get version info
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG=$(git tag --sort=-version:refname | head -n1)
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Building tag: $TAG"
+
+      - name: Apply port fix
+        run: |
+          sed -i 's/net_controlsocket4 = UDP4_OpenSocket (0)/net_controlsocket4 = UDP4_OpenSocket (57613)/' Quake/net_udp.c
+          echo "=== Port fix applied ==="
+          grep -A1 -B1 "57613" Quake/net_udp.c
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-riscv64-${{ hashFiles('.github/workflows/release-build.yml') }}
+
+      - name: Install cross-compilation toolchain and dependencies
+        run: |
+          sudo apt-get update
+
+          # Add RISC-V architecture for cross-dependencies
+          sudo dpkg --add-architecture riscv64
+
+          # Add RISC-V ports repo for riscv64 packages
+          cat <<'EOF' | sudo tee /etc/apt/sources.list.d/ubuntu-riscv64.sources
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports/
+          Suites: noble noble-updates noble-security
+          Components: main restricted universe multiverse
+          Architectures: riscv64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+
+          sudo apt-get update
+
+          # Cross compiler toolchain
+          sudo apt-get install -y \
+            gcc-riscv64-linux-gnu \
+            g++-riscv64-linux-gnu \
+            pkg-config-riscv64-linux-gnu \
+            meson \
+            ninja-build
+
+          # Cross-compiled runtime libraries for riscv64
+          sudo apt-get install -y \
+            libsdl2-dev:riscv64 \
+            libvulkan-dev:riscv64 \
+            libvorbis-dev:riscv64 \
+            libmpg123-dev:riscv64 \
+            libflac-dev:riscv64 \
+            libopusfile-dev:riscv64 \
+            libx11-xcb-dev:riscv64 \
+            glslang-tools \
+            spirv-tools
+
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Create meson cross file
+        run: |
+          cat > riscv64-cross.ini << 'EOF'
+          [binaries]
+          c = 'riscv64-linux-gnu-gcc'
+          cpp = 'riscv64-linux-gnu-g++'
+          ar = 'riscv64-linux-gnu-ar'
+          strip = 'riscv64-linux-gnu-strip'
+          pkg-config = 'riscv64-linux-gnu-pkg-config'
+
+          [host_machine]
+          system = 'linux'
+          cpu_family = 'riscv64'
+          cpu = 'riscv64'
+          endian = 'little'
+          EOF
+
+      - name: Cache meson build
+        uses: actions/cache@v4
+        with:
+          path: build-riscv64
+          key: meson-riscv64-${{ hashFiles('Quake/**') }}
+          restore-keys: meson-riscv64-
+
+      - name: Build vkQuake
+        run: |
+          PKG_CONFIG_PATH=/usr/lib/riscv64-linux-gnu/pkgconfig \
+          meson setup build-riscv64 \
+            --cross-file riscv64-cross.ini \
+            --buildtype release \
+          || \
+          PKG_CONFIG_PATH=/usr/lib/riscv64-linux-gnu/pkgconfig \
+          meson setup --wipe build-riscv64 \
+            --cross-file riscv64-cross.ini \
+            --buildtype release
+
+          ninja -C build-riscv64 -j$(nproc)
+          riscv64-linux-gnu-strip build-riscv64/vkquake
+
+          # Verify it's a RISC-V binary
+          file build-riscv64/vkquake
+
+      - name: Package release
+        run: |
+          TAG="${{ steps.get_version.outputs.tag }}"
+          FOLDER="vkquake-${TAG}-linux-riscv64"
+          mkdir -p "$FOLDER"
+          cp build-riscv64/vkquake "$FOLDER/"
+          cp LICENSE.txt "$FOLDER/"
+          tar -czf "${FOLDER}.tar.gz" "$FOLDER"
+          ls -la ${FOLDER}.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-riscv64
+          path: vkquake-*-linux-riscv64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # ===========================================================================
+  # Unified release — waits for all three builds
+  # ===========================================================================
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+    needs: [build-amd64, build-arm64, build-riscv64]
+
+    steps:
+      - name: Checkout upstream branch
+        uses: actions/checkout@v6
+        with:
+          ref: upstream
+          fetch-depth: 0
+
+      - name: Set git identity
         run: |
           git config user.name "${{ github.repository_owner }}"
           git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
@@ -221,15 +374,13 @@ jobs:
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Download amd64 artifact
+      - name: Download all artifacts
         uses: actions/download-artifact@v7
         with:
-          name: release-amd64
+          merge-multiple: true
 
-      - name: Download arm64 artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: release-arm64
+      - name: List release files
+        run: ls -la vkquake-*
 
       - name: Create Release
         uses: softprops/action-gh-release@v2.6.1
@@ -239,16 +390,19 @@ jobs:
           body: |
             vkQuake ${{ steps.get_tag.outputs.tag }} with fixed client port 57613
 
-            **Changes:**
+            **Changes from upstream:**
             - Client control socket always uses UDP port 57613 instead of a random port
             - Easier firewall management: just allow UDP 57613 outbound on your client machine
-            - AMD64 built using upstream's proven Docker build system
-            - ARM64 built natively (no emulation)
 
-            **Files:**
-            - `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage` — AMD64 portable AppImage
-            - `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz` — AMD64 archive
-            - `vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.tar.gz` — ARM64 archive
+            **Builds:**
+            | File | Architecture | Method |
+            |------|-------------|--------|
+            | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage` | AMD64 | Upstream Docker build system |
+            | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz` | AMD64 | Upstream Docker build system |
+            | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.tar.gz` | ARM64 | Native build |
+            | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-riscv64.tar.gz` | RISC-V 64 (rv64gc) | Cross-compiled |
+
+            **RISC-V note:** Targets generic `rv64gc` — compatible with Orange Pi RV2, VisionFive 2, Milk-V Pioneer, and any modern RISC-V 64-bit board. Vulkan driver support on RISC-V is still maturing; the binary is ready for when drivers land on your board.
 
             **Firewall rule (client machine):**
             ```
@@ -258,6 +412,7 @@ jobs:
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.tar.gz
+            vkquake-${{ steps.get_tag.outputs.tag }}-linux-riscv64.tar.gz
           draft: false
           prerelease: false
         env:
