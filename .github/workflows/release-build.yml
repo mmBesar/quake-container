@@ -11,8 +11,19 @@ permissions:
   contents: write
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-24.04
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            appimage_suffix: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            appimage_suffix: aarch64
 
     steps:
       - name: Checkout code
@@ -44,13 +55,18 @@ jobs:
 
           echo "Building tag: $TAG"
           echo "Version: $VERSION"
+          echo "Arch: ${{ matrix.arch }}"
 
       - name: Apply port fix
         run: |
-          sed -i 's/address\.sin_port = htons ((unsigned short)port);/if (port == 0) port = 57613;\n\taddress.sin_port = htons ((unsigned short)port);/' Quake/net_udp.c
+          # Surgical fix: only the control socket init call gets port 57613
+          # This avoids the double-bind crash when connecting to a server
+          # The control socket is opened once at startup for LAN discovery
+          # All other sockets (connection, listen) remain on random/configured ports
+          sed -i 's/net_controlsocket4 = UDP4_OpenSocket (0)/net_controlsocket4 = UDP4_OpenSocket (57613)/' Quake/net_udp.c
 
           echo "=== Port fix applied ==="
-          grep -A2 -B2 "port = 57613" Quake/net_udp.c
+          grep -A1 -B1 "57613" Quake/net_udp.c
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -59,12 +75,12 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: Packaging/AppImage/docker
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           tags: build-vkquake
           load: true
           push: false
-          cache-from: type=gha
-          cache-to: type=gha
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }}
 
       - name: Build vkQuake using upstream system
         run: |
@@ -81,43 +97,103 @@ jobs:
 
           TAG="${{ steps.get_version.outputs.tag }}"
           VERSION="${{ steps.get_version.outputs.version }}-port-fixed"
+          ARCH="${{ matrix.arch }}"
+          APPIMAGE_SUFFIX="${{ matrix.appimage_suffix }}"
 
-          # Upstream produces: vkQuake-{VERSION}-x86_64.AppImage (capital Q)
-          # and: vkquake-{VERSION}_linux64.tar.gz
-          ARCHIVE=$(ls vkquake-${VERSION}_linux64.tar.gz)
-          APPIMAGE=$(ls vkQuake-${VERSION}-x86_64.AppImage)
+          # Upstream produces:
+          # vkQuake-{VERSION}-{appimage_suffix}.AppImage (capital Q)
+          # vkquake-{VERSION}_linux64.tar.gz  (amd64 only — upstream uses this naming)
+          APPIMAGE=$(ls vkQuake-${VERSION}-${APPIMAGE_SUFFIX}.AppImage)
+          mv "$APPIMAGE" "vkquake-${TAG}-linux-${ARCH}.AppImage"
 
-          mv "$ARCHIVE"  "vkquake-${TAG}-linux-amd64.tar.gz"
-          mv "$APPIMAGE" "vkquake-${TAG}-linux-amd64.AppImage"
+          # tar.gz only produced by upstream for amd64
+          if [ "$ARCH" = "amd64" ]; then
+            ARCHIVE=$(ls vkquake-${VERSION}_linux64.tar.gz)
+            mv "$ARCHIVE" "vkquake-${TAG}-linux-${ARCH}.tar.gz"
+          fi
 
           echo "=== Generated files ==="
           ls -la vkquake-${TAG}-*
 
           mv vkquake-${TAG}-* ../../
 
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-${{ matrix.arch }}
+          path: |
+            vkquake-*-linux-${{ matrix.arch }}.AppImage
+            vkquake-*-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: warn
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: upstream
+          fetch-depth: 0
+
+      - name: Set git identity to repo owner
+        run: |
+          git config user.name "${{ github.repository_owner }}"
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+      - name: Get tag
+        id: get_tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG=$(git tag --sort=-version:refname | head -n1)
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Download amd64 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: release-amd64
+
+      - name: Download arm64 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: release-arm64
+
       - name: Create Release
         uses: softprops/action-gh-release@v2.6.1
         with:
-          tag_name: ${{ steps.get_version.outputs.tag }}
-          name: vkQuake ${{ steps.get_version.outputs.tag }} (Fixed Port)
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: vkQuake ${{ steps.get_tag.outputs.tag }} (Fixed Port)
           body: |
-            vkQuake ${{ steps.get_version.outputs.tag }} with fixed client port 57613
+            vkQuake ${{ steps.get_tag.outputs.tag }} with fixed client port 57613
 
             **Changes:**
-            - Client always uses UDP port 57613 instead of random ports
-            - Built using upstream's proven Docker build system
-            - Includes both AppImage and tar.gz formats for Linux x86_64
+            - Client control socket always uses UDP port 57613 instead of a random port
+            - Easier firewall management: just allow UDP 57613 outbound on your client
+            - Built natively for both AMD64 and ARM64 (no emulation)
 
             **Files:**
-            - `vkquake-${{ steps.get_version.outputs.tag }}-linux-amd64.AppImage` - Portable AppImage format
-            - `vkquake-${{ steps.get_version.outputs.tag }}-linux-amd64.tar.gz` - Traditional archive
+            - `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage` - AMD64 AppImage
+            - `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz` - AMD64 archive
+            - `vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.AppImage` - ARM64 AppImage
 
             **Installation:**
             - AppImage: Download, make executable (`chmod +x`), and run
             - tar.gz: Extract and run the `vkquake` binary
+
+            **Firewall rule (client machine):**
+            ```
+            allow udp out port 57613
+            ```
           files: |
-            vkquake-${{ steps.get_version.outputs.tag }}-linux-amd64.AppImage
-            vkquake-${{ steps.get_version.outputs.tag }}-linux-amd64.tar.gz
+            vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage
+            vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz
+            vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.AppImage
           draft: false
           prerelease: false
         env:
