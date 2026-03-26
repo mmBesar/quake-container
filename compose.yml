@@ -1,0 +1,181 @@
+services:
+  quake:
+    image: ghcr.io/mmbesar/quake-container:latest
+    container_name: quake
+    labels:
+      - category=games
+
+    # -------------------------------------------------------------------------
+    # Network
+    # host mode is recommended — gives best UDP performance and LAN visibility
+    # To use port mapping instead: comment out network_mode and uncomment ports
+    # -------------------------------------------------------------------------
+    network_mode: "host"
+    # ports:
+    #   - "${QUAKE_PORT:-26000}:${QUAKE_PORT:-26000}/udp"
+
+    # -------------------------------------------------------------------------
+    # Run as your host user to avoid permission issues with mounted volumes
+    # Get your IDs with: id
+    # -------------------------------------------------------------------------
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+    # -------------------------------------------------------------------------
+    # Volume mounts
+    #
+    # Game files are mounted individually so Frogbot (built into the image)
+    # is not overwritten. Add any extra mod directories the same way.
+    #
+    # DO NOT mount /quake/game directly — it would hide the built-in Frogbot.
+    # -------------------------------------------------------------------------
+    volumes:
+      # Required: base game files
+      - ${CONTAINER_DIR}/quake/game/id1:/quake/game/id1
+
+      # Optional expansion packs — comment out any you don't have
+      - ${CONTAINER_DIR}/quake/game/hipnotic:/quake/game/hipnotic   # Mission Pack 1
+      - ${CONTAINER_DIR}/quake/game/rogue:/quake/game/rogue         # Mission Pack 2
+      - ${CONTAINER_DIR}/quake/game/dopa:/quake/game/dopa           # Episode 5
+      - ${CONTAINER_DIR}/quake/game/mg1:/quake/game/mg1             # Quake 2021 re-release
+      - ${CONTAINER_DIR}/quake/game/ctf:/quake/game/ctf             # CTF mod
+      - ${CONTAINER_DIR}/quake/game/movies:/quake/game/movies       # Intro movies
+
+      # Server config and logs (persisted on host)
+      - ${CONTAINER_DIR}/quake/config:/quake/config
+      - ${CONTAINER_DIR}/quake/logs:/quake/logs
+
+    environment:
+      # -----------------------------------------------------------------------
+      # Server identity
+      # -----------------------------------------------------------------------
+      - QUAKE_SERVER_NAME=${QUAKE_SERVER_NAME:-vkQuake Server}
+      - QUAKE_MAX_PLAYERS=${QUAKE_MAX_PLAYERS:-16}
+      - QUAKE_PORT=${QUAKE_PORT:-26000}
+
+      # -----------------------------------------------------------------------
+      # Game mode
+      # Only one of DEATHMATCH/COOP should be 1 at a time
+      # TEAMPLAY: 0=off  1=no friendly fire  2=friendly fire
+      # -----------------------------------------------------------------------
+      - QUAKE_DEATHMATCH=${QUAKE_DEATHMATCH:-1}
+      - QUAKE_COOP=${QUAKE_COOP:-0}
+      - QUAKE_TEAMPLAY=${QUAKE_TEAMPLAY:-0}
+
+      # -----------------------------------------------------------------------
+      # Skill: standard Quake scale 0-3
+      # 0=Easy  1=Normal  2=Hard  3=Nightmare
+      # Only affects monsters in coop mode — ignored by Frogbot bots
+      # -----------------------------------------------------------------------
+      - QUAKE_SKILL=${QUAKE_SKILL:-1}
+
+      # -----------------------------------------------------------------------
+      # Match settings
+      # -----------------------------------------------------------------------
+      - QUAKE_FRAGLIMIT=${QUAKE_FRAGLIMIT:-20}
+      - QUAKE_TIMELIMIT=${QUAKE_TIMELIMIT:-10}
+
+      # -----------------------------------------------------------------------
+      # Map settings
+      # QUAKE_MAP: starting map
+      # QUAKE_MAP_ROTATION: comma-separated list of maps to cycle through
+      # QUAKE_ROTATION_MODE: 1=enable rotation  0=stay on same map
+      # -----------------------------------------------------------------------
+      - QUAKE_MAP=${QUAKE_MAP:-start}
+      - QUAKE_MAP_ROTATION=${QUAKE_MAP_ROTATION:-start,e1m1,e1m2,e1m3,e1m4,e1m5,e1m6,e1m7,e1m8}
+      - QUAKE_ROTATION_MODE=${QUAKE_ROTATION_MODE:-1}
+
+      # -----------------------------------------------------------------------
+      # Bot settings (Frogbot v2 — built into the image)
+      # QUAKE_ENABLE_BOTS: 1=enable Frogbot  0=vanilla server (no bots)
+      # QUAKE_BOT_COUNT: number of bots to spawn (1-16)
+      # QUAKE_BOT_SKILL: Frogbot skill scale 0-20
+      #   0=Easiest  5=Default  10=Challenging  15=Hard  20=Inhuman
+      # -----------------------------------------------------------------------
+      - QUAKE_ENABLE_BOTS=${QUAKE_ENABLE_BOTS:-1}
+      - QUAKE_BOT_COUNT=${QUAKE_BOT_COUNT:-4}
+      - QUAKE_BOT_SKILL=${QUAKE_BOT_SKILL:-5}
+
+      # -----------------------------------------------------------------------
+      # Mod support
+      # Leave empty to use Frogbot (default when QUAKE_ENABLE_BOTS=1)
+      # Set to a mod directory name to load a different mod instead
+      # Example: QUAKE_MOD=ctf
+      # -----------------------------------------------------------------------
+      - QUAKE_MOD=${QUAKE_MOD:-}
+
+      # -----------------------------------------------------------------------
+      # Admin
+      # RCON password for remote admin access
+      # Leave empty to disable RCON
+      # Connect with: rcon_password <pass> then rcon <command>
+      # -----------------------------------------------------------------------
+      - QUAKE_ADMIN_PASSWORD=${QUAKE_ADMIN_PASSWORD:-}
+
+      # -----------------------------------------------------------------------
+      # Server physics
+      # These are the standard Quake defaults — change only if you know why
+      # QUAKE_GRAVITY: 800=normal  200=low gravity  1200=heavy
+      # QUAKE_MAX_SPEED: 320=normal  400=fast
+      # QUAKE_FRICTION: 4=normal  2=slippery  8=sticky
+      # QUAKE_AIM: 1=auto-aim on  0=off (recommended for deathmatch)
+      # QUAKE_PAUSABLE: 0=server cannot be paused  1=can be paused
+      # -----------------------------------------------------------------------
+      - QUAKE_GRAVITY=${QUAKE_GRAVITY:-800}
+      - QUAKE_MAX_SPEED=${QUAKE_MAX_SPEED:-320}
+      - QUAKE_FRICTION=${QUAKE_FRICTION:-4}
+      - QUAKE_AIM=${QUAKE_AIM:-1}
+      - QUAKE_PAUSABLE=${QUAKE_PAUSABLE:-0}
+
+      # -----------------------------------------------------------------------
+      # Memory
+      # Amount of RAM in MB to allocate to the server
+      # 64MB is fine for most setups, increase for large mods
+      # -----------------------------------------------------------------------
+      - QUAKE_MEMORY=${QUAKE_MEMORY:-64}
+
+      # -----------------------------------------------------------------------
+      # Debug
+      # QUAKE_CONDEBUG: 1=write console output to /quake/logs/qconsole.log
+      # -----------------------------------------------------------------------
+      - QUAKE_CONDEBUG=${QUAKE_CONDEBUG:-1}
+
+    # -------------------------------------------------------------------------
+    # Resource limits
+    # Adjust based on your host machine's available resources
+    # -------------------------------------------------------------------------
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+          cpus: '0.5'
+
+    # -------------------------------------------------------------------------
+    # Health check
+    # Verifies the server UDP port is open and listening
+    # -------------------------------------------------------------------------
+    healthcheck:
+      test: ["CMD-SHELL", "ss -uln | grep :${QUAKE_PORT:-26000} || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+    # -------------------------------------------------------------------------
+    # Restart policy
+    # unless-stopped: restarts on crash but not on manual docker stop
+    # -------------------------------------------------------------------------
+    restart: unless-stopped
+
+    # -------------------------------------------------------------------------
+    # Logging
+    # Keeps last 3 log files, max 10MB each
+    # View with: docker logs -f quake
+    # -------------------------------------------------------------------------
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
