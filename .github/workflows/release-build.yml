@@ -231,6 +231,7 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           merge-multiple: true
+          pattern: release-*
 
       - name: List release files
         run: ls -la vkquake-*
