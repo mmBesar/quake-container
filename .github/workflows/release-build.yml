@@ -15,7 +15,12 @@ permissions:
 #
 # AMD64   → upstream Docker build system → AppImage + tar.gz
 # ARM64   → native ubuntu-24.04-arm runner → tar.gz
-# RISCV64 → cross-compile on AMD64 runner → tar.gz
+# RISCV64 → Debian 13 container on AMD64 runner → tar.gz
+#
+# TO DISABLE RISC-V BUILD:
+#   1. Add `if: false` to the build-riscv64 job (line marked below)
+#   2. Remove 'build-riscv64' from the needs: list in the release job (marked below)
+#   3. Remove the riscv64 file from the release files list (marked below)
 # ===========================================================================
 
 jobs:
@@ -58,6 +63,8 @@ jobs:
 
       - name: Apply port fix
         run: |
+          # Surgical fix: only the control socket init call gets port 57613
+          # Avoids double-bind crash when connecting to a server
           sed -i 's/net_controlsocket4 = UDP4_OpenSocket (0)/net_controlsocket4 = UDP4_OpenSocket (57613)/' Quake/net_udp.c
           echo "=== Port fix applied ==="
           grep -A1 -B1 "57613" Quake/net_udp.c
@@ -193,11 +200,26 @@ jobs:
           retention-days: 1
 
   # ===========================================================================
-  # RISC-V 64: cross-compile on AMD64 → tar.gz
-  # Targets generic rv64gc — works on Orange Pi RV2, VisionFive 2, Milk-V, etc.
+  # RISC-V 64: cross-compile inside Debian 13 (Trixie) container
+  #
+  # Why Debian 13?
+  #   - Native RISC-V support out of the box
+  #   - No apt source gymnastics needed
+  #   - Stable, controlled environment — unaffected by GitHub runner updates
+  #   - First run slow (image pull + packages), subsequent runs fast via GHA cache
+  #
+  # Targets generic rv64gc:
+  #   Compatible with Orange Pi RV2, VisionFive 2, Milk-V Pioneer, and any
+  #   modern RISC-V 64-bit board.
+  #
+  # TO DISABLE THIS JOB: add the following line after `name: Build riscv64`
+  #   if: false
+  # Then also update the release job below (see marked comments there).
   # ===========================================================================
   build-riscv64:
     name: Build riscv64
+    # TO DISABLE: uncomment the next line
+    # if: false
     runs-on: ubuntu-24.04
 
     steps:
@@ -229,105 +251,38 @@ jobs:
           echo "=== Port fix applied ==="
           grep -A1 -B1 "57613" Quake/net_udp.c
 
-      - name: Cache apt packages
-        uses: actions/cache@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build RISC-V binary inside Debian 13 container
+        uses: docker/build-push-action@v7
         with:
-          path: /var/cache/apt/archives
-          key: apt-riscv64-${{ hashFiles('.github/workflows/release-build.yml') }}
+          # Uses inline Dockerfile via stdin — no separate Dockerfile needed
+          # Debian 13 (Trixie) has native RISC-V cross-compilation support
+          context: .
+          file: .github/dockerfiles/Dockerfile.riscv64
+          platforms: linux/amd64
+          tags: build-riscv64
+          load: true
+          push: false
+          cache-from: type=gha,scope=debian-riscv64
+          cache-to: type=gha,scope=debian-riscv64,mode=max
 
-      - name: Configure apt for RISC-V cross-compilation
+      - name: Extract binary from container
         run: |
-          # Add riscv64 architecture
-          sudo dpkg --add-architecture riscv64
-
-          # Pin existing repos to amd64 only — riscv64 is NOT on security.ubuntu.com
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list 2>/dev/null || true
-
-          # Add ports.ubuntu.com for riscv64 packages only
-          cat <<'EOF' | sudo tee /etc/apt/sources.list.d/riscv64-ports.list
-          deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
-          deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
-          deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
-          EOF
-
-          sudo apt-get update
-
-      - name: Install cross-compilation toolchain and dependencies
-        run: |
-          # Cross compiler
-          sudo apt-get install -y \
-            gcc-riscv64-linux-gnu \
-            g++-riscv64-linux-gnu \
-            meson \
-            ninja-build \
-            glslang-tools \
-            spirv-tools
-
-          # Cross-compiled libraries for riscv64
-          sudo apt-get install -y \
-            libsdl2-dev:riscv64 \
-            libvulkan-dev:riscv64 \
-            libvorbis-dev:riscv64 \
-            libmpg123-dev:riscv64 \
-            libflac-dev:riscv64 \
-            libopusfile-dev:riscv64 \
-            libx11-xcb-dev:riscv64
-
-          sudo rm -rf /var/lib/apt/lists/*
-
-      - name: Create meson cross file
-        run: |
-          cat > riscv64-cross.ini << 'EOF'
-          [binaries]
-          c = 'riscv64-linux-gnu-gcc'
-          cpp = 'riscv64-linux-gnu-g++'
-          ar = 'riscv64-linux-gnu-ar'
-          strip = 'riscv64-linux-gnu-strip'
-          pkg-config = 'pkg-config'
-
-          [built-in options]
-          c_args = ['-march=rv64gc', '-mabi=lp64d']
-          cpp_args = ['-march=rv64gc', '-mabi=lp64d']
-
-          [host_machine]
-          system = 'linux'
-          cpu_family = 'riscv64'
-          cpu = 'riscv64'
-          endian = 'little'
-          EOF
-
-      - name: Cache meson build
-        uses: actions/cache@v4
-        with:
-          path: build-riscv64
-          key: meson-riscv64-${{ hashFiles('Quake/**') }}
-          restore-keys: meson-riscv64-
-
-      - name: Build vkQuake
-        run: |
-          PKG_CONFIG_LIBDIR=/usr/lib/riscv64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
-          meson setup build-riscv64 \
-            --cross-file riscv64-cross.ini \
-            --buildtype release \
-          || \
-          PKG_CONFIG_LIBDIR=/usr/lib/riscv64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
-          meson setup --wipe build-riscv64 \
-            --cross-file riscv64-cross.ini \
-            --buildtype release
-
-          ninja -C build-riscv64 -j$(nproc)
-          riscv64-linux-gnu-strip build-riscv64/vkquake
+          docker create --name riscv64-extract build-riscv64
+          docker cp riscv64-extract:/output/vkquake ./vkquake-riscv64
+          docker rm riscv64-extract
 
           # Verify it's a RISC-V binary
-          file build-riscv64/vkquake
+          file vkquake-riscv64
 
       - name: Package release
         run: |
           TAG="${{ steps.get_version.outputs.tag }}"
           FOLDER="vkquake-${TAG}-linux-riscv64"
           mkdir -p "$FOLDER"
-          cp build-riscv64/vkquake "$FOLDER/"
+          cp vkquake-riscv64 "$FOLDER/vkquake"
           cp LICENSE.txt "$FOLDER/"
           tar -czf "${FOLDER}.tar.gz" "$FOLDER"
           ls -la ${FOLDER}.tar.gz
@@ -342,11 +297,18 @@ jobs:
 
   # ===========================================================================
   # Unified release — waits for all three builds
+  #
+  # TO DISABLE RISC-V:
+  #   Remove 'build-riscv64' from the needs: list below
+  #   Remove the riscv64 line from the files: list in Create Release
   # ===========================================================================
   release:
     name: Create GitHub Release
     runs-on: ubuntu-24.04
-    needs: [build-amd64, build-arm64, build-riscv64]
+    needs:
+      - build-amd64
+      - build-arm64
+      - build-riscv64  # TO DISABLE RISC-V: remove this line
 
     steps:
       - name: Checkout upstream branch
@@ -396,7 +358,7 @@ jobs:
             | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage` | AMD64 | Upstream Docker build |
             | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz` | AMD64 | Upstream Docker build |
             | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.tar.gz` | ARM64 | Native build |
-            | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-riscv64.tar.gz` | RISC-V 64 (rv64gc) | Cross-compiled |
+            | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-riscv64.tar.gz` | RISC-V 64 (rv64gc) | Cross-compiled in Debian 13 |
 
             **RISC-V note:** Targets generic `rv64gc` — compatible with Orange Pi RV2, VisionFive 2, Milk-V Pioneer, and any modern RISC-V 64-bit board. Vulkan driver support on RISC-V is still maturing; the binary is ready for when drivers land on your board.
 
@@ -408,7 +370,7 @@ jobs:
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.tar.gz
-            vkquake-${{ steps.get_tag.outputs.tag }}-linux-riscv64.tar.gz
+            vkquake-${{ steps.get_tag.outputs.tag }}-linux-riscv64.tar.gz  # TO DISABLE RISC-V: remove this line
           draft: false
           prerelease: false
         env:
