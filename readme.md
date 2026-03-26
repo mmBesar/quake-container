@@ -1,228 +1,362 @@
-# vkQuake Server Docker
+# quake-container
 
-> **⚠️ Disclaimer:**
-> This project is **not affiliated with id Software**, Bethesda, or any official Quake project.  
-> This repository is **solely for personal use**.  
-> They are **not** affiliated with, endorsed by, or connected in any way to the [vkQuake](https://github.com/Novum/vkQuake) project.  
+![Personal Project](https://img.shields.io/badge/personal-project-blue)
+![License](https://img.shields.io/badge/license-GPL--2.0-green)
+![Container](https://img.shields.io/badge/ghcr.io-quake--container-blue?logo=docker)
+![AMD64](https://img.shields.io/badge/arch-amd64-informational)
+![ARM64](https://img.shields.io/badge/arch-arm64-informational)
+![Upstream Sync](https://img.shields.io/github/actions/workflow/status/mmBesar/quake-container/sync-upstream.yml?label=upstream%20sync)
+![Image Build](https://img.shields.io/github/actions/workflow/status/mmBesar/quake-container/image-build.yml?label=image%20build)
+![Release Build](https://img.shields.io/github/actions/workflow/status/mmBesar/quake-container/release-build.yml?label=client%20build)
+
+> ⚠️ **Personal Project**
+> This is a personal project built for my own use. It is not affiliated with, endorsed by, or connected
+> in any way to id Software, Bethesda, the vkQuake project, or the Frogbot project.
 > Use at your own risk. No warranties are provided.
 
 ---
 
-## Status
-
-🔧 **Under Construction**  
-This project is still being set up.
-Stay tuned.
+A fully automated, self-updating Quake server stack built on [vkQuake](https://github.com/Novum/vkQuake).
+It tracks upstream vkQuake releases daily, builds multi-arch container images automatically,
+and ships fixed-port client binaries for Linux AMD64 and ARM64.
 
 ---
 
-A containerized Quake server based on vkQuake/QuakeSpasm with full configuration support via environment variables.
+## What's in this repo
 
-## Features
+| Component | Description |
+|-----------|-------------|
+| **Server container** | vkQuake dedicated server with [Frogbot v2](https://github.com/DrLex0/quake-frogbots) bots built in |
+| **Client binaries** | vkQuake client with fixed UDP port 57613 for AMD64 and ARM64 |
+| **Automation** | Daily upstream sync, automatic image builds, automatic client releases |
 
-- **Multi-architecture support**: AMD64 and ARM64 (Raspberry Pi 4 compatible)
-- **User-friendly**: Run with custom UID/GID for proper file permissions
-- **Flexible configuration**: All server settings via environment variables
-- **Map rotation**: Automatic map cycling support
-- **Bot support**: Ready for bot mods (Frogbot integration)
-- **Mod support**: Easy mod loading (CTF, DOPA, etc.)
-- **Health monitoring**: Built-in health checks
-- **Separate volumes**: Game files, config, and logs in separate mounts
+---
 
-## Quick Start
-
-1. **Prepare game files**: Place your Quake game files in the structure shown below
-2. **Configure environment**: Copy `.env.example` to `.env` and adjust settings
-3. **Start server**: Run `docker-compose up -d`
-
-## Directory Structure
-
-Your game directory should look like this:
+## Architecture
 
 ```
-game/
-├── ctf/
+upstream vkQuake (Novum/vkQuake)
+         │
+         │  daily sync
+         ▼
+   upstream branch ──────────────────────────────────────────┐
+         │                                                    │
+         │  new tag detected                                  │  new tag detected
+         ▼                                                    ▼
+   image-build.yml                                   release-build.yml
+   (server container)                                (client binaries)
+         │                                                    │
+    ┌────┴────┐                                       ┌───────┴───────┐
+    │  AMD64  │  ARM64                                │     AMD64     │  ARM64
+    └────┬────┘                                       └───────┬───────┘
+         │                                                    │
+         ▼                                                    ▼
+   ghcr.io/mmbesar/quake-container                  GitHub Releases
+   :latest  :1.33  :1.33.1                          vkquake-1.33.1-linux-amd64.AppImage
+                                                    vkquake-1.33.1-linux-amd64.tar.gz
+                                                    vkquake-1.33.1-linux-arm64.tar.gz
+```
+
+---
+
+## Server — Quick Start
+
+### Requirements
+
+- Docker and Docker Compose
+- Quake game files (you must own a legal copy of Quake)
+  - Required: `id1/pak0.pak` and `id1/pak1.pak`
+
+### 1. Prepare game files
+
+Place your Quake game files on the host:
+
+```
+/srv/docker/cont/quake/game/
+├── id1/
+│   ├── pak0.pak      ← required
+│   ├── pak1.pak      ← required
+│   └── music/        ← optional
+├── ctf/              ← optional mods
 ├── dopa/
 ├── hipnotic/
-│   └── music/
-├── id1/
-│   ├── pak0.pak
-│   ├── pak1.pak
-│   └── music/
-├── mg1/
-├── movies/
-└── rogue/
-    └── music/
+├── rogue/
+└── ...
 ```
 
-## Configuration
+> **Note:** Do not create a `frogbot/` directory — Frogbot is built into the container image.
 
-All configuration is done via environment variables. Copy `.env.example` to `.env` and customize:
+### 2. Configure
 
-### Server Settings
-- `QUAKE_SERVER_NAME`: Server name displayed in browser
-- `QUAKE_MAX_PLAYERS`: Maximum player count (1-16)
-- `QUAKE_PORT`: Server port (default: 26000)
+Copy `.env` and edit to your needs:
+
+```bash
+cp .env .env.local
+nano .env.local
+```
+
+Key settings:
+
+```env
+# Host paths
+CONTAINER_DIR=/srv/docker/cont
+
+# Server identity
+QUAKE_SERVER_NAME="My Quake Server"
+QUAKE_MAX_PLAYERS=8
+QUAKE_PORT=26000
+
+# Admin (never commit this to git!)
+QUAKE_ADMIN_PASSWORD=your_password_here
+
+# Bots
+QUAKE_ENABLE_BOTS=1
+QUAKE_BOT_COUNT=4
+QUAKE_BOT_SKILL=5      # Frogbot scale: 0=easiest, 10=challenging, 20=inhuman
+```
+
+### 3. Run
+
+```bash
+docker compose up -d
+docker compose logs -f
+```
+
+### 4. Connect
+
+Open your vkQuake client console with `~` and type:
+
+```
+connect <server_ip>:26000
+```
+
+---
+
+## Server — Environment Variables
+
+### Server Identity
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QUAKE_SERVER_NAME` | `vkQuake Docker Server` | Name shown in server browser |
+| `QUAKE_MAX_PLAYERS` | `8` | Maximum players (1–16) |
+| `QUAKE_PORT` | `26000` | UDP port the server listens on |
 
 ### Game Mode
-- `QUAKE_DEATHMATCH`: Enable deathmatch (1/0)
-- `QUAKE_COOP`: Enable cooperative mode (1/0)
-- `QUAKE_TEAMPLAY`: Enable team play (1/0)
-- `QUAKE_SKILL`: Skill level (0-3)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QUAKE_DEATHMATCH` | `1` | Deathmatch mode (1=on, 0=off) |
+| `QUAKE_COOP` | `0` | Co-op mode (1=on, 0=off) |
+| `QUAKE_TEAMPLAY` | `0` | Team play (1=on, 0=off) |
+| `QUAKE_SKILL` | `1` | Monster skill 0–3 (coop only, ignored by bots) |
 
 ### Match Settings
-- `QUAKE_FRAGLIMIT`: Frag limit for map change
-- `QUAKE_TIMELIMIT`: Time limit in minutes
 
-### Map Rotation
-- `QUAKE_MAP`: Starting map
-- `QUAKE_MAP_ROTATION`: Comma-separated list of maps
-- `QUAKE_ROTATION_MODE`: Enable rotation (1/0)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QUAKE_FRAGLIMIT` | `20` | Frags to end map (0=disabled) |
+| `QUAKE_TIMELIMIT` | `15` | Minutes to end map (0=disabled) |
+| `QUAKE_MAP` | `start` | Starting map |
 
 ### Admin
-- `QUAKE_ADMIN_PASSWORD`: RCON password for admin access
 
-### Bots
-- `QUAKE_ENABLE_BOTS`: Enable bot support (1/0)
-- `QUAKE_BOT_COUNT`: Number of bots (1-16)
-- `QUAKE_BOT_SKILL`: Bot skill level (0-3)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QUAKE_ADMIN_PASSWORD` | *(unset)* | RCON password — set at runtime only, never in image |
 
-### Mods
-- `QUAKE_MOD`: Mod directory name (e.g., "ctf", "dopa")
+### Bots (Frogbot v2)
 
-## Usage
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QUAKE_ENABLE_BOTS` | `1` | Enable Frogbot mod (1=on, 0=off) |
+| `QUAKE_BOT_COUNT` | `4` | Number of bots to add at start |
+| `QUAKE_BOT_SKILL` | `5` | Bot difficulty: 0=easiest, 5=default, 10=challenging, 20=inhuman |
 
-### Starting the Server
+### Debug
 
-```bash
-# Copy and edit configuration
-cp .env.example .env
-nano .env
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QUAKE_CONDEBUG` | `1` | Write console output to `logs/qconsole.log` |
 
-# Start the server
-docker-compose up -d
+---
 
-# View logs
-docker-compose logs -f
+## Server — Admin
+
+Use RCON to manage the server remotely from your client console:
+
 ```
-
-### Connecting to Server
-
-From vkQuake client:
-1. Open console with `~`
-2. Type: `connect <server_ip>:26000`
-
-Or use the server browser to find "My vkQuake Server" on your LAN.
-
-### Admin Commands
-
-Connect to server and use RCON:
-```
-rcon_password <your_admin_password>
+rcon_password your_password_here
 rcon status
 rcon changelevel e1m1
-rcon kick <player_name>
+rcon kick playername
+rcon addbot
+rcon removebot
 ```
 
-### Map Management
+---
 
-The server supports automatic map rotation. Maps change when:
-- Frag limit is reached
-- Time limit is reached
-- Admin forces map change
+## Server — Volumes
 
-## File Permissions
+| Host path | Container path | Purpose |
+|-----------|---------------|---------|
+| `${CONTAINER_DIR}/quake/game/id1` | `/quake/game/id1` | Base game files |
+| `${CONTAINER_DIR}/quake/game/ctf` | `/quake/game/ctf` | CTF mod |
+| `${CONTAINER_DIR}/quake/game/dopa` | `/quake/game/dopa` | DOPA expansion |
+| `${CONTAINER_DIR}/quake/game/hipnotic` | `/quake/game/hipnotic` | Mission Pack 1 |
+| `${CONTAINER_DIR}/quake/game/rogue` | `/quake/game/rogue` | Mission Pack 2 |
+| `${CONTAINER_DIR}/quake/config` | `/quake/config` | Server config (auto-generated) |
+| `${CONTAINER_DIR}/quake/logs` | `/quake/logs` | Server logs |
 
-The container runs as a non-root user. Set `PUID` and `PGID` in your `.env` to match your host user:
+---
+
+## Client Binaries
+
+Pre-built vkQuake client binaries with a fixed UDP source port (`57613`) are published
+with every upstream release.
+
+### Why a fixed port?
+
+By default, vkQuake picks a random UDP port when connecting to a server. This makes
+firewall rules hard to manage. The fixed port patch forces the client to always use
+`57613` as its source port — one firewall rule, done forever.
+
+### Firewall rule (client machine)
 
 ```bash
-# Get your user ID and group ID
-id
-
-# Set in .env file
-PUID=1000
-PGID=1000
+# Allow outbound UDP on port 57613
+ufw allow out 57613/udp
 ```
 
-## Mod Support
+### Download
 
-### Adding Mods
+Get the latest release from the [Releases page](https://github.com/mmBesar/quake-container/releases).
 
-1. Place mod files in appropriate game subdirectory
-2. Set `QUAKE_MOD=mod_name` in `.env`
-3. Restart container
+| File | Architecture |
+|------|-------------|
+| `vkquake-X.X.X-linux-amd64.AppImage` | AMD64 — portable, no install needed |
+| `vkquake-X.X.X-linux-amd64.tar.gz` | AMD64 — binary archive |
+| `vkquake-X.X.X-linux-arm64.tar.gz` | ARM64 — binary archive |
 
-### Bot Support
+### Usage
 
-The container includes Frogbot integration. To enable:
-1. Set `QUAKE_ENABLE_BOTS=1`
-2. Configure bot count and skill
-3. Restart server
+```bash
+# AppImage (AMD64)
+chmod +x vkquake-1.33.1-linux-amd64.AppImage
+./vkquake-1.33.1-linux-amd64.AppImage
+
+# tar.gz (any arch)
+tar -xzf vkquake-1.33.1-linux-arm64.tar.gz
+./vkquake-1.33.1-linux-arm64/vkquake
+```
+
+---
+
+## Automation
+
+All automation runs on GitHub Actions with no manual intervention needed.
+
+### Workflows
+
+| Workflow | Trigger | What it does |
+|----------|---------|-------------|
+| `sync-upstream.yml` | Daily at midnight | Syncs upstream vkQuake source, detects new tags |
+| `image-build.yml` | New upstream tag / main branch changes | Builds and pushes multi-arch container image |
+| `release-build.yml` | New upstream tag (manual trigger) | Builds fixed-port client binaries and creates a GitHub Release |
+
+### Container image tags
+
+| Tag | Meaning |
+|-----|---------|
+| `latest` | Always points to the newest build |
+| `1.33` | Minor version — updated with each patch |
+| `1.33.1` | Exact upstream version |
+
+### Pull the image
+
+```bash
+docker pull ghcr.io/mmbesar/quake-container:latest
+```
+
+---
+
+## Bots — Frogbot v2
+
+The server container ships with [Frogbot v2](https://github.com/DrLex0/quake-frogbots)
+by [DrLex0](https://github.com/DrLex0) built in. Frogbot is a classic QuakeC bot mod
+originally created by Robert 'Frog' Field in 1997, revived and improved in the v2 fork.
+
+- Bot skill ranges from **0** (easiest) to **20** (inhuman) — much more granular than standard Quake's 0–3
+- Supports **96 maps** out of the box with built-in waypoints
+- Designed and tested specifically with vkQuake (NetQuake engine)
+- Always fetches the **latest Frogbot release** at image build time
+
+To disable bots and run a vanilla server, set `QUAKE_ENABLE_BOTS=0`.
+
+---
+
+## Building Locally
+
+```bash
+# Clone
+git clone https://github.com/mmBesar/quake-container.git
+cd quake-container
+
+# Build image
+docker build -t quake-container .
+
+# Run
+docker compose up -d
+```
+
+---
 
 ## Troubleshooting
 
-### Common Issues
+**Server not visible on LAN**
+- Check firewall: `sudo ufw allow 26000/udp`
+- Verify Docker network allows UDP: `docker compose ps`
 
-**Server not visible on LAN:**
-- Check firewall rules for UDP port 26000
-- Verify `QUAKE_PORT` environment variable
-- Ensure Docker network allows UDP traffic
+**Game files not found**
+- Ensure `pak0.pak` exists at `${CONTAINER_DIR}/quake/game/id1/pak0.pak`
+- Check ownership matches `PUID`/`PGID` in `.env`
 
-**Game files not found:**
-- Verify pak0.pak exists in `/quake/game/id1/`
-- Check file permissions and ownership
-- Ensure volume mounts are correct
+**No bots in game**
+- Verify `QUAKE_ENABLE_BOTS=1` in `.env`
+- Check logs: `docker compose logs -f`
+- Frogbot only works on supported maps — try `e1m1`, `dm4`, `aerowalk`
 
-**Performance issues:**
-- Adjust Docker resource limits
-- Consider using SSD storage for game files
-- Monitor container resource usage
+**Client can't connect (fixed-port binary)**
+- Ensure nothing else is using port `57613`: `ss -uln | grep 57613`
+- Allow `57613/udp` outbound on your client firewall
 
-### Logs
-
+**View server logs**
 ```bash
-# View server logs
-docker-compose logs vkquake-server
-
-# Follow real-time logs
-docker-compose logs -f vkquake-server
-
-# Check container status
-docker-compose ps
+docker compose logs -f
+# or
+tail -f ${CONTAINER_DIR}/quake/logs/qconsole.log
 ```
 
-## Building from Source
+---
 
-```bash
-# Build locally
-docker build -t vkquake-server .
+## Credits
 
-# Build for multiple architectures
-docker buildx build --platform linux/amd64,linux/arm64 -t vkquake-server .
-```
+This project stands on the shoulders of these fine people and their work:
+
+| Project | Author(s) | License |
+|---------|-----------|---------|
+| [Quake](https://github.com/id-Software/Quake) | id Software | GPL-2.0 |
+| [vkQuake](https://github.com/Novum/vkQuake) | Dominic Szablewski & contributors | GPL-2.0 |
+| [Frogbot v2](https://github.com/DrLex0/quake-frogbots) | DrLex0, original by Robert 'Frog' Field | GPL-2.0 |
+| [Frogbot waypoints](https://github.com/DrLex0/quake-frogbots) | Trinca and contributors | GPL-2.0 |
+
+---
 
 ## License
 
-This project follows the same license as vkQuake and QuakeSpasm (GNU GPL v2).
-See: [vkQuake LICENSE](https://github.com/Novum/vkQuake/blob/master/LICENSE.txt)
+This project (Dockerfile, entrypoint.sh, workflows) is released under the
+[GNU GPL v2](https://github.com/Novum/vkQuake/blob/master/LICENSE.txt),
+consistent with vkQuake and Frogbot.
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
-## Support
-
-For issues related to:
-- **Container/Docker**: Open an issue in this repository
-- **vkQuake engine**: Visit the [vkQuake repository](https://github.com/Novum/vkQuake)
-- **Quake gameplay**: Check [QuakeWiki](https://quakewiki.org/) or [QuakeOne forums](https://quakeone.com/)
-
-## Disclaimer & Legal
-
-- No affiliation: This repo is independent and unofficial.
-- No warranty: Use at your own risk.
-- It is for my personal use.
-- Trademarks: id Software, Bethesda, and Quake are a registered trademark of there respective owners. All rights reserved by their respective parties.
+Quake, id Software, and Bethesda are trademarks of their respective owners.
+This project is not affiliated with or endorsed by any of them.
