@@ -18,9 +18,9 @@ permissions:
 # RISCV64 → Debian 13 container on AMD64 runner → tar.gz
 #
 # TO DISABLE RISC-V BUILD:
-#   1. Add `if: false` to the build-riscv64 job (line marked below)
+#   1. Uncomment `if: false` in the build-riscv64 job (marked below)
 #   2. Remove 'build-riscv64' from the needs: list in the release job (marked below)
-#   3. Remove the riscv64 file from the release files list (marked below)
+#   3. Remove the riscv64 line from the files: list in Create Release (marked below)
 # ===========================================================================
 
 jobs:
@@ -212,22 +212,27 @@ jobs:
   #   Compatible with Orange Pi RV2, VisionFive 2, Milk-V Pioneer, and any
   #   modern RISC-V 64-bit board.
   #
-  # TO DISABLE THIS JOB: add the following line after `name: Build riscv64`
-  #   if: false
-  # Then also update the release job below (see marked comments there).
+  # TO DISABLE: uncomment `if: false` below, then update the release job.
   # ===========================================================================
   build-riscv64:
     name: Build riscv64
-    # TO DISABLE: uncomment the next line
+    # TO DISABLE RISC-V: uncomment the next line
     # if: false
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout upstream branch
+      - name: Checkout main branch (Dockerfile.riscv64)
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          path: main-repo
+
+      - name: Checkout upstream branch (vkQuake source)
         uses: actions/checkout@v6
         with:
           ref: upstream
           fetch-depth: 0
+          path: upstream-src
 
       - name: Set git identity
         run: |
@@ -237,6 +242,7 @@ jobs:
       - name: Get version info
         id: get_version
         run: |
+          cd upstream-src
           if [ -n "${{ github.event.inputs.tag }}" ]; then
             TAG="${{ github.event.inputs.tag }}"
           else
@@ -247,6 +253,7 @@ jobs:
 
       - name: Apply port fix
         run: |
+          cd upstream-src
           sed -i 's/net_controlsocket4 = UDP4_OpenSocket (0)/net_controlsocket4 = UDP4_OpenSocket (57613)/' Quake/net_udp.c
           echo "=== Port fix applied ==="
           grep -A1 -B1 "57613" Quake/net_udp.c
@@ -257,10 +264,9 @@ jobs:
       - name: Build RISC-V binary inside Debian 13 container
         uses: docker/build-push-action@v7
         with:
-          # Uses inline Dockerfile via stdin — no separate Dockerfile needed
-          # Debian 13 (Trixie) has native RISC-V cross-compilation support
-          context: .
-          file: .github/dockerfiles/Dockerfile.riscv64
+          # Source is the upstream checkout, Dockerfile from main branch
+          context: upstream-src
+          file: main-repo/.github/dockerfiles/Dockerfile.riscv64
           platforms: linux/amd64
           tags: build-riscv64
           load: true
@@ -273,8 +279,7 @@ jobs:
           docker create --name riscv64-extract build-riscv64
           docker cp riscv64-extract:/output/vkquake ./vkquake-riscv64
           docker rm riscv64-extract
-
-          # Verify it's a RISC-V binary
+          # Verify it is a RISC-V binary
           file vkquake-riscv64
 
       - name: Package release
@@ -283,7 +288,7 @@ jobs:
           FOLDER="vkquake-${TAG}-linux-riscv64"
           mkdir -p "$FOLDER"
           cp vkquake-riscv64 "$FOLDER/vkquake"
-          cp LICENSE.txt "$FOLDER/"
+          cp upstream-src/LICENSE.txt "$FOLDER/"
           tar -czf "${FOLDER}.tar.gz" "$FOLDER"
           ls -la ${FOLDER}.tar.gz
 
@@ -299,8 +304,8 @@ jobs:
   # Unified release — waits for all three builds
   #
   # TO DISABLE RISC-V:
-  #   Remove 'build-riscv64' from the needs: list below
-  #   Remove the riscv64 line from the files: list in Create Release
+  #   - Remove 'build-riscv64' from needs: below
+  #   - Remove the riscv64 line from files: in Create Release below
   # ===========================================================================
   release:
     name: Create GitHub Release
@@ -370,7 +375,7 @@ jobs:
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.tar.gz
-            vkquake-${{ steps.get_tag.outputs.tag }}-linux-riscv64.tar.gz  # TO DISABLE RISC-V: remove this line
+            vkquake-${{ steps.get_tag.outputs.tag }}-linux-riscv64.tar.gz
           draft: false
           prerelease: false
         env:
