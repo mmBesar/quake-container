@@ -221,23 +221,18 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout main branch (Dockerfile.riscv64)
+      - name: Checkout main branch (for Dockerfile.riscv64)
         uses: actions/checkout@v6
         with:
           ref: main
           path: main-repo
 
-      - name: Checkout upstream branch (vkQuake source)
+      - name: Checkout upstream branch (for vkQuake source)
         uses: actions/checkout@v6
         with:
           ref: upstream
           fetch-depth: 0
           path: upstream-src
-
-      - name: Set git identity
-        run: |
-          git config user.name "${{ github.repository_owner }}"
-          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
 
       - name: Get version info
         id: get_version
@@ -253,10 +248,11 @@ jobs:
 
       - name: Apply port fix
         run: |
-          cd upstream-src
-          sed -i 's/net_controlsocket4 = UDP4_OpenSocket (0)/net_controlsocket4 = UDP4_OpenSocket (57613)/' Quake/net_udp.c
+          # Surgical fix: only the control socket init call gets port 57613
+          # Avoids double-bind crash when connecting to a server
+          sed -i 's/net_controlsocket4 = UDP4_OpenSocket (0)/net_controlsocket4 = UDP4_OpenSocket (57613)/' upstream-src/Quake/net_udp.c
           echo "=== Port fix applied ==="
-          grep -A1 -B1 "57613" Quake/net_udp.c
+          grep -A1 -B1 "57613" upstream-src/Quake/net_udp.c
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -264,7 +260,6 @@ jobs:
       - name: Build RISC-V binary inside Debian 13 container
         uses: docker/build-push-action@v7
         with:
-          # Source is the upstream checkout, Dockerfile from main branch
           context: upstream-src
           file: main-repo/.github/dockerfiles/Dockerfile.riscv64
           platforms: linux/amd64
