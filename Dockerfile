@@ -77,50 +77,71 @@ WORKDIR /quake
 EXPOSE 26000/udp
 
 # =============================================================================
-# Environment variables with defaults
+# Environment variable defaults
+# All values can be overridden via docker-compose.yml or .env
+#
 # Note: QUAKE_ADMIN_PASSWORD is intentionally NOT set here.
 #       Always pass it at runtime via .env or docker-compose to avoid
 #       baking secrets into the image.
 # =============================================================================
 ENV \
     # --- Server identity ---
-    QUAKE_SERVER_NAME="vkQuake Docker Server" \
-    QUAKE_MAX_PLAYERS="8" \
+    QUAKE_SERVER_NAME="vkQuake Server" \
+    QUAKE_MAX_PLAYERS="16" \
     QUAKE_PORT="26000" \
     \
     # --- Game mode (1=enable, 0=disable) ---
-    # Only one of deathmatch/coop should be 1 at a time
+    # Only one of DEATHMATCH/COOP should be 1 at a time
+    # TEAMPLAY: 0=off  1=no friendly fire  2=friendly fire
     QUAKE_DEATHMATCH="1" \
     QUAKE_COOP="0" \
     QUAKE_TEAMPLAY="0" \
     \
     # --- Skill: standard Quake scale 0-3 ---
     # 0=Easy  1=Normal  2=Hard  3=Nightmare
-    # Only relevant in coop/single-player with monsters
-    # Has no effect in deathmatch with bots
+    # Only affects monsters in coop mode — ignored by Frogbot
     QUAKE_SKILL="1" \
     \
     # --- Match settings ---
     QUAKE_FRAGLIMIT="20" \
-    QUAKE_TIMELIMIT="15" \
+    QUAKE_TIMELIMIT="10" \
     \
     # --- Map settings ---
     QUAKE_MAP="start" \
+    QUAKE_MAP_ROTATION="start,e1m1,e1m2,e1m3,e1m4,e1m5,e1m6,e1m7,e1m8" \
+    QUAKE_ROTATION_MODE="1" \
     \
     # --- Bots (Frogbot v2) ---
-    # Set to 1 to enable Frogbot mod, 0 for vanilla server
+    # QUAKE_ENABLE_BOTS: 1=load Frogbot mod  0=vanilla server
+    # QUAKE_BOT_COUNT: number of bots to spawn (1-16)
+    # QUAKE_BOT_SKILL: Frogbot scale 0-20
+    #   0=Easiest  5=Default  10=Challenging  15=Hard  20=Inhuman
     QUAKE_ENABLE_BOTS="1" \
-    # Number of bots to add at start (1-16)
     QUAKE_BOT_COUNT="4" \
-    # Bot skill: Frogbot scale 0-20
-    # 0=Easiest  5=Default  10=Challenging  20=Inhuman
     QUAKE_BOT_SKILL="5" \
     \
+    # --- Mod support ---
+    # Leave empty to use Frogbot when QUAKE_ENABLE_BOTS=1
+    # Set to a mod directory name to load a different mod
+    QUAKE_MOD="" \
+    \
+    # --- Server physics ---
+    # Standard Quake defaults — change only if you know why
+    QUAKE_GRAVITY="800" \
+    QUAKE_MAX_SPEED="320" \
+    QUAKE_FRICTION="4" \
+    QUAKE_AIM="1" \
+    QUAKE_PAUSABLE="0" \
+    \
+    # --- Memory ---
+    # RAM in MB allocated to the server
+    QUAKE_MEMORY="64" \
+    \
     # --- Debug ---
-    # Set to 1 to write console output to logs/qconsole.log
+    # 1=write console output to /quake/logs/qconsole.log
     QUAKE_CONDEBUG="1"
 
-# Health check using ss (iproute2) — checks UDP port is open
+# Health check using ss (iproute2) — verifies UDP port is open
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD ss -uln | grep ":${QUAKE_PORT}" > /dev/null || exit 1
 
