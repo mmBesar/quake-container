@@ -11,16 +11,12 @@ permissions:
   contents: write
 
 # ===========================================================================
-# Three parallel builds feed one unified release job.
+# Two parallel builds feed one unified release job.
 #
-# AMD64   → upstream Docker build system → AppImage + tar.gz
-# ARM64   → native ubuntu-24.04-arm runner → tar.gz
-# RISCV64 → Debian 13 container on AMD64 runner → tar.gz
+# AMD64 → upstream Docker build system → AppImage + tar.gz
+# ARM64 → native ubuntu-24.04-arm runner → tar.gz
 #
-# TO DISABLE RISC-V BUILD:
-#   1. Uncomment `if: false` in the build-riscv64 job (marked below)
-#   2. Remove 'build-riscv64' from the needs: list in the release job (marked below)
-#   3. Remove the riscv64 line from the files: list in Create Release (marked below)
+# RISC-V: planned for future when board (Orange Pi RV2) arrives.
 # ===========================================================================
 
 jobs:
@@ -200,107 +196,7 @@ jobs:
           retention-days: 1
 
   # ===========================================================================
-  # RISC-V 64: cross-compile inside Debian 13 (Trixie) container
-  #
-  # Why Debian 13?
-  #   - Native RISC-V support out of the box
-  #   - No apt source gymnastics needed
-  #   - Stable, controlled environment — unaffected by GitHub runner updates
-  #   - First run slow (image pull + packages), subsequent runs fast via GHA cache
-  #
-  # Targets generic rv64gc:
-  #   Compatible with Orange Pi RV2, VisionFive 2, Milk-V Pioneer, and any
-  #   modern RISC-V 64-bit board.
-  #
-  # TO DISABLE: uncomment `if: false` below, then update the release job.
-  # ===========================================================================
-  build-riscv64:
-    name: Build riscv64
-    # TO DISABLE RISC-V: uncomment the next line
-    # if: false
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout main branch (for Dockerfile.riscv64)
-        uses: actions/checkout@v6
-        with:
-          ref: main
-          path: main-repo
-
-      - name: Checkout upstream branch (for vkQuake source)
-        uses: actions/checkout@v6
-        with:
-          ref: upstream
-          fetch-depth: 0
-          path: upstream-src
-
-      - name: Get version info
-        id: get_version
-        run: |
-          cd upstream-src
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG=$(git tag --sort=-version:refname | head -n1)
-          fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Building tag: $TAG"
-
-      - name: Apply port fix
-        run: |
-          # Surgical fix: only the control socket init call gets port 57613
-          # Avoids double-bind crash when connecting to a server
-          sed -i 's/net_controlsocket4 = UDP4_OpenSocket (0)/net_controlsocket4 = UDP4_OpenSocket (57613)/' upstream-src/Quake/net_udp.c
-          echo "=== Port fix applied ==="
-          grep -A1 -B1 "57613" upstream-src/Quake/net_udp.c
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build RISC-V binary inside Debian 13 container
-        uses: docker/build-push-action@v7
-        with:
-          context: upstream-src
-          file: main-repo/.github/dockerfiles/Dockerfile.riscv64
-          platforms: linux/amd64
-          tags: build-riscv64
-          load: true
-          push: false
-          cache-from: type=gha,scope=debian-riscv64
-          cache-to: type=gha,scope=debian-riscv64,mode=max
-
-      - name: Extract binary from container
-        run: |
-          docker create --name riscv64-extract build-riscv64
-          docker cp riscv64-extract:/output/vkquake ./vkquake-riscv64
-          docker rm riscv64-extract
-          # Verify it is a RISC-V binary
-          file vkquake-riscv64
-
-      - name: Package release
-        run: |
-          TAG="${{ steps.get_version.outputs.tag }}"
-          FOLDER="vkquake-${TAG}-linux-riscv64"
-          mkdir -p "$FOLDER"
-          cp vkquake-riscv64 "$FOLDER/vkquake"
-          cp upstream-src/LICENSE.txt "$FOLDER/"
-          tar -czf "${FOLDER}.tar.gz" "$FOLDER"
-          ls -la ${FOLDER}.tar.gz
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-riscv64
-          path: vkquake-*-linux-riscv64.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-
-  # ===========================================================================
-  # Unified release — waits for all three builds
-  #
-  # TO DISABLE RISC-V:
-  #   - Remove 'build-riscv64' from needs: below
-  #   - Remove the riscv64 line from files: in Create Release below
+  # Unified release — waits for both builds
   # ===========================================================================
   release:
     name: Create GitHub Release
@@ -308,7 +204,6 @@ jobs:
     needs:
       - build-amd64
       - build-arm64
-      - build-riscv64  # TO DISABLE RISC-V: remove this line
 
     steps:
       - name: Checkout upstream branch
@@ -358,9 +253,6 @@ jobs:
             | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage` | AMD64 | Upstream Docker build |
             | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz` | AMD64 | Upstream Docker build |
             | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.tar.gz` | ARM64 | Native build |
-            | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-riscv64.tar.gz` | RISC-V 64 (rv64gc) | Cross-compiled in Debian 13 |
-
-            **RISC-V note:** Targets generic `rv64gc` — compatible with Orange Pi RV2, VisionFive 2, Milk-V Pioneer, and any modern RISC-V 64-bit board. Vulkan driver support on RISC-V is still maturing; the binary is ready for when drivers land on your board.
 
             **Firewall rule (client machine):**
             ```
@@ -370,7 +262,6 @@ jobs:
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz
             vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.tar.gz
-            vkquake-${{ steps.get_tag.outputs.tag }}-linux-riscv64.tar.gz
           draft: false
           prerelease: false
         env:
