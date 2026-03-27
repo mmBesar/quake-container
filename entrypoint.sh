@@ -9,7 +9,12 @@
 #   1. Frogbot autoexec.cfg runs → loads frogbot-quake.cfg (sets d_skill 5)
 #   2. Our server.cfg runs → overrides hostname, maxplayers, fraglimit, etc.
 #   3. +set d_skill on command line → overrides Frogbot's skill AFTER map loads
-#   4. +addbot commands → bots spawn with correct skill
+#
+# Adding bots:
+#   Frogbot bots must be added manually after connecting to the server.
+#   Type 'addbot' in the console, or use RCON:
+#     rcon_password <your_password>
+#     rcon addbot
 # =============================================================================
 set -e
 
@@ -58,6 +63,7 @@ maxplayers ${QUAKE_MAX_PLAYERS}
 
 // --- Game mode ---
 // Only one of deathmatch/coop should be 1 at a time
+// TEAMPLAY: 0=off  1=no friendly fire  2=friendly fire
 deathmatch ${QUAKE_DEATHMATCH}
 coop ${QUAKE_COOP}
 teamplay ${QUAKE_TEAMPLAY}
@@ -81,7 +87,6 @@ pausable ${QUAKE_PAUSABLE}
 // --- Map rotation ---
 // Uses Frogbot's fb_nm alias system for NetQuake engines
 // QUAKE_MAP_ROTATION is a comma-separated list of maps
-// Example: start,e1m1,e1m2,e1m3
 EOF
 
     # Generate map rotation aliases if enabled
@@ -89,20 +94,19 @@ EOF
         echo "" >> "$config_file"
         echo "// Auto-generated map rotation" >> "$config_file"
 
-        # Split comma-separated map list into array
         IFS=',' read -ra MAPS <<< "${QUAKE_MAP_ROTATION}"
         local count=${#MAPS[@]}
 
         for (( i=0; i<count; i++ )); do
-            current="${MAPS[$i]// /}"  # trim spaces
-            next="${MAPS[$(( (i+1) % count ))]// /}"  # wrap around
+            current="${MAPS[$i]// /}"
+            next="${MAPS[$(( (i+1) % count ))]// /}"
             echo "alias nm_${current} \"cmd fb_nm ${next}\"" >> "$config_file"
         done
 
         echo -e "${GREEN}Map rotation configured: ${QUAKE_MAP_ROTATION}${NC}"
     fi
 
-    # Admin password — only written if set, never empty
+    # Admin password — only written if set
     if [ -n "${QUAKE_ADMIN_PASSWORD}" ]; then
         echo "" >> "$config_file"
         echo "rcon_password \"${QUAKE_ADMIN_PASSWORD}\"" >> "$config_file"
@@ -147,7 +151,6 @@ build_args() {
     fi
 
     # --- Game mode cvars ---
-    # Set via + commands so they override any config file values
     args+=("+deathmatch"  "${QUAKE_DEATHMATCH}")
     args+=("+coop"        "${QUAKE_COOP}")
     args+=("+teamplay"    "${QUAKE_TEAMPLAY}")
@@ -171,21 +174,9 @@ build_args() {
 
     # --- Bot skill ---
     # MUST be set AFTER +map because Frogbot resets d_skill on map load
-    # This is why it's here and not in server.cfg
-    # Scale: 0=Easiest  5=Default  10=Challenging  20=Inhuman
+    # Scale: 0=Easiest  5=Default  10=Challenging  15=Hard  20=Inhuman
     if [ "${QUAKE_ENABLE_BOTS}" = "1" ]; then
         args+=("+set d_skill" "${QUAKE_BOT_SKILL}")
-    fi
-
-    # --- Add bots after map loads ---
-    # addbot commands execute sequentially after +map
-    if [ "${QUAKE_ENABLE_BOTS}" = "1" ] && \
-       [ -d "/quake/game/frogbot" ] && \
-       [ -f "/quake/game/frogbot/progs.dat" ]; then
-        for i in $(seq 1 "${QUAKE_BOT_COUNT}"); do
-            args+=("+addbot")
-        done
-        echo -e "${GREEN}Will spawn ${QUAKE_BOT_COUNT} bot(s) at skill ${QUAKE_BOT_SKILL}/20${NC}"
     fi
 
     printf '%s\n' "${args[@]}"
@@ -220,20 +211,22 @@ main() {
     echo -e "Starting Map : ${YELLOW}${QUAKE_MAP}${NC}"
     echo -e "Map Rotation : ${YELLOW}${QUAKE_ROTATION_MODE} (${QUAKE_MAP_ROTATION})${NC}"
     echo -e "Mod          : ${YELLOW}${QUAKE_MOD:-frogbot (built-in)}${NC}"
-    echo -e "Bots         : ${YELLOW}${QUAKE_ENABLE_BOTS} — count: ${QUAKE_BOT_COUNT}, skill: ${QUAKE_BOT_SKILL}/20${NC}"
+    echo -e "Bots         : ${YELLOW}${QUAKE_ENABLE_BOTS} — skill: ${QUAKE_BOT_SKILL}/20${NC}"
     echo -e "Memory       : ${YELLOW}${QUAKE_MEMORY}MB${NC}"
     echo -e "Gravity      : ${YELLOW}${QUAKE_GRAVITY}${NC}"
     echo -e "Max Speed    : ${YELLOW}${QUAKE_MAX_SPEED}${NC}"
     echo -e "${CYAN}----------------------------${NC}"
 
+    if [ "${QUAKE_ENABLE_BOTS}" = "1" ]; then
+        echo -e "${YELLOW}Note: Add bots after connecting with 'addbot' or via RCON: 'rcon addbot'${NC}"
+    fi
+
     create_server_config
 
-    # Build args safely into array (one arg per line)
     mapfile -t CMD_ARGS < <(build_args)
 
     echo -e "${GREEN}Starting vkQuake server...${NC}"
 
-    # Change to logs directory so qconsole.log lands there
     cd /quake/logs
 
     /quake/bin/vkquake "${CMD_ARGS[@]}" &
