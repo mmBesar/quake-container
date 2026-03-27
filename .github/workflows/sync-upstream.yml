@@ -84,7 +84,19 @@ jobs:
       - name: Trigger image build
         if: steps.detect_tags.outputs.new_tag != ''
         run: |
+          # Explicitly target THIS repo, not the upstream remote
           gh workflow run image-build.yml \
+            --repo ${{ github.repository }} \
             --field image_tag=${{ steps.detect_tags.outputs.new_tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger release build
+        if: steps.detect_tags.outputs.new_tag != ''
+        run: |
+          # Explicitly target THIS repo, not the upstream remote
+          gh workflow run release-build.yml \
+            --repo ${{ github.repository }} \
+            --field tag=${{ steps.detect_tags.outputs.new_tag }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
