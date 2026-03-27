@@ -1,0 +1,276 @@
+name: Build vkQuake with Fixed Port
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (leave empty for latest)'
+        required: false
+
+permissions:
+  contents: write
+
+# ===========================================================================
+# Two parallel builds feed one unified release job.
+#
+# AMD64 → upstream Docker build system → AppImage + tar.gz
+# ARM64 → native ubuntu-24.04-arm runner → tar.gz
+#
+# RISC-V build is not included yet — pending a confirmed working solution.
+# ===========================================================================
+
+jobs:
+
+  # ===========================================================================
+  # AMD64: upstream Docker build system → AppImage + tar.gz
+  # ===========================================================================
+  build-amd64:
+    name: Build amd64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout upstream branch
+        uses: actions/checkout@v6
+        with:
+          ref: upstream
+          fetch-depth: 0
+
+      - name: Set git identity
+        run: |
+          git config user.name "${{ github.repository_owner }}"
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+      - name: Get version info
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG=$(git tag --sort=-version:refname | head -n1)
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+          BASE_VERSION=$(grep -oP "^#define\s*VKQUAKE_VERSION\s*\K[0-9.]*" Quake/quakever.h)
+          PATCH_VERSION=$(grep -oP "^#define\s*VKQUAKE_VER_PATCH\s*\K[0-9.]*" Quake/quakever.h)
+          SUFFIX=$(grep -oP "^#define\s*VKQUAKE_VER_SUFFIX\s*\"\K([^\"]*)" Quake/quakever.h || echo "")
+          VERSION="${BASE_VERSION}.${PATCH_VERSION}${SUFFIX}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building tag: $TAG / Version: $VERSION"
+
+      - name: Apply port fix
+        run: |
+          # Surgical fix: only the control socket init call gets port 57613
+          # Avoids double-bind crash when connecting to a server
+          sed -i 's/net_controlsocket4 = UDP4_OpenSocket (0)/net_controlsocket4 = UDP4_OpenSocket (57613)/' Quake/net_udp.c
+          echo "=== Port fix applied ==="
+          grep -A1 -B1 "57613" Quake/net_udp.c
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build upstream Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: Packaging/AppImage/docker
+          platforms: linux/amd64
+          tags: build-vkquake
+          load: true
+          push: false
+          cache-from: type=gha,scope=upstream-docker
+          cache-to: type=gha,scope=upstream-docker,mode=max
+
+      - name: Build vkQuake using upstream system
+        run: |
+          chmod +x Packaging/AppImage/run-in-docker.sh
+          docker run --rm --privileged \
+            -e VERSION=${{ steps.get_version.outputs.version }}-port-fixed \
+            -v "$PWD:/usr/src/vkQuake" \
+            build-vkquake /usr/src/vkQuake/Packaging/AppImage/run-in-docker.sh
+
+      - name: Prepare release files
+        run: |
+          cd Packaging/AppImage
+          TAG="${{ steps.get_version.outputs.tag }}"
+          VERSION="${{ steps.get_version.outputs.version }}-port-fixed"
+
+          ARCHIVE=$(ls vkquake-${VERSION}_linux64.tar.gz)
+          APPIMAGE=$(ls vkQuake-${VERSION}-x86_64.AppImage)
+
+          mv "$ARCHIVE"  "vkquake-${TAG}-linux-amd64.tar.gz"
+          mv "$APPIMAGE" "vkquake-${TAG}-linux-amd64.AppImage"
+
+          ls -la vkquake-${TAG}-*
+
+          # Move only the two renamed files — not the extracted folder
+          mv "vkquake-${TAG}-linux-amd64.tar.gz" ../../
+          mv "vkquake-${TAG}-linux-amd64.AppImage" ../../
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-amd64
+          path: |
+            vkquake-*-linux-amd64.AppImage
+            vkquake-*-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # ===========================================================================
+  # ARM64: native runner → meson/ninja → tar.gz
+  # ===========================================================================
+  build-arm64:
+    name: Build arm64
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout upstream branch
+        uses: actions/checkout@v6
+        with:
+          ref: upstream
+          fetch-depth: 0
+
+      - name: Set git identity
+        run: |
+          git config user.name "${{ github.repository_owner }}"
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+      - name: Get version info
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG=$(git tag --sort=-version:refname | head -n1)
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Building tag: $TAG"
+
+      - name: Apply port fix
+        run: |
+          sed -i 's/net_controlsocket4 = UDP4_OpenSocket (0)/net_controlsocket4 = UDP4_OpenSocket (57613)/' Quake/net_udp.c
+          echo "=== Port fix applied ==="
+          grep -A1 -B1 "57613" Quake/net_udp.c
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-arm64-${{ hashFiles('.github/workflows/release-build.yml') }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            meson ninja-build gcc g++ pkg-config \
+            glslang-tools spirv-tools \
+            libsdl2-dev libvulkan-dev libvorbis-dev \
+            libmpg123-dev libflac-dev libopusfile-dev \
+            libx11-xcb-dev
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Cache meson build
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: meson-arm64-${{ hashFiles('Quake/**') }}
+          restore-keys: meson-arm64-
+
+      - name: Build vkQuake
+        run: |
+          meson setup build || meson setup --wipe build
+          ninja -C build -j$(nproc)
+          strip build/vkquake
+
+      - name: Package release
+        run: |
+          TAG="${{ steps.get_version.outputs.tag }}"
+          FOLDER="vkquake-${TAG}-linux-arm64"
+          mkdir -p "$FOLDER"
+          cp build/vkquake "$FOLDER/"
+          cp LICENSE.txt "$FOLDER/"
+          tar -czf "${FOLDER}.tar.gz" "$FOLDER"
+          ls -la ${FOLDER}.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-arm64
+          path: vkquake-*-linux-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # ===========================================================================
+  # Unified release — waits for both builds
+  # ===========================================================================
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+    needs:
+      - build-amd64
+      - build-arm64
+
+    steps:
+      - name: Checkout upstream branch
+        uses: actions/checkout@v6
+        with:
+          ref: upstream
+          fetch-depth: 0
+
+      - name: Set git identity
+        run: |
+          git config user.name "${{ github.repository_owner }}"
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+      - name: Get tag
+        id: get_tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG=$(git tag --sort=-version:refname | head -n1)
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Download AMD64 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: release-amd64
+
+      - name: Download ARM64 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: release-arm64
+
+      - name: List release files
+        run: ls -la vkquake-*
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2.6.1
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: vkQuake ${{ steps.get_tag.outputs.tag }} (Fixed Port)
+          body: |
+            vkQuake ${{ steps.get_tag.outputs.tag }} with fixed client port 57613
+
+            **Changes from upstream:**
+            - Client control socket always uses UDP port 57613 instead of a random port
+            - Easier firewall management: just allow UDP 57613 outbound on your client machine
+
+            **Builds:**
+            | File | Architecture | Method |
+            |------|-------------|--------|
+            | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage` | AMD64 | Upstream Docker build |
+            | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz` | AMD64 | Upstream Docker build |
+            | `vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.tar.gz` | ARM64 | Native build |
+
+            **Firewall rule (client machine):**
+            ```
+            allow udp out port 57613
+            ```
+          files: |
+            vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.AppImage
+            vkquake-${{ steps.get_tag.outputs.tag }}-linux-amd64.tar.gz
+            vkquake-${{ steps.get_tag.outputs.tag }}-linux-arm64.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

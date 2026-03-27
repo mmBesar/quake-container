@@ -1,0 +1,112 @@
+name: Sync Upstream Source
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync-upstream:
+    name: Sync upstream to local upstream branch
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set git identity
+        run: |
+          git config user.name "${{ github.repository_owner }}"
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+      - name: Detect new upstream version
+        id: detect
+        run: |
+          # Get latest release tag from THIS repo (source of truth for what's been built)
+          OUR_LATEST=$(curl -sf \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
+            | jq -r '.tag_name // "0.0.0"')
+
+          # Get latest tag from upstream vkQuake
+          UPSTREAM_LATEST=$(curl -sf \
+            "https://api.github.com/repos/Novum/vkQuake/releases/latest" \
+            | jq -r '.tag_name // "0.0.0"')
+
+          echo "Our latest release : $OUR_LATEST"
+          echo "Upstream latest tag: $UPSTREAM_LATEST"
+
+          # Compare versions using sort -V (handles semver correctly)
+          NEWER=$(printf '%s\n%s\n' "$OUR_LATEST" "$UPSTREAM_LATEST" | sort -V | tail -n1)
+
+          if [ "$NEWER" = "$UPSTREAM_LATEST" ] && [ "$UPSTREAM_LATEST" != "$OUR_LATEST" ]; then
+            echo "New upstream version found: $UPSTREAM_LATEST"
+            echo "new_tag=$UPSTREAM_LATEST" >> $GITHUB_OUTPUT
+          else
+            echo "Already up to date at $OUR_LATEST. Nothing to do."
+            echo "new_tag=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Add upstream remote and fetch
+        if: steps.detect.outputs.new_tag != ''
+        run: |
+          git remote add upstream https://github.com/Novum/vkQuake.git
+          git fetch upstream --tags --force
+
+      - name: Sync upstream branch
+        if: steps.detect.outputs.new_tag != ''
+        run: |
+          # Save your workflows before switching branches
+          mkdir -p /tmp/my-workflows
+          cp -r .github/workflows/* /tmp/my-workflows/
+
+          git checkout -B upstream upstream/master
+          rm -rf .github/workflows
+          mkdir -p .github/workflows
+          cp -r /tmp/my-workflows/* .github/workflows/
+
+          git add .
+          git commit -m "Sync upstream @ ${{ steps.detect.outputs.new_tag }}" || true
+          git push origin upstream --force
+
+      - name: Push new tag
+        if: steps.detect.outputs.new_tag != ''
+        run: |
+          TAG="${{ steps.detect.outputs.new_tag }}"
+
+          # /tmp/my-workflows was already populated in the previous step
+          git checkout -B temp-$TAG $TAG
+          rm -rf .github/workflows
+          mkdir -p .github/workflows
+          cp -r /tmp/my-workflows/* .github/workflows/
+
+          git add .
+          git commit -m "Remove upstream workflows from $TAG" || true
+          git tag -f $TAG
+          git checkout upstream
+          git branch -D temp-$TAG
+
+          git push origin $TAG --force
+
+      - name: Trigger image build
+        if: steps.detect.outputs.new_tag != ''
+        run: |
+          gh workflow run image-build.yml \
+            --repo ${{ github.repository }} \
+            --field image_tag=${{ steps.detect.outputs.new_tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger release build
+        if: steps.detect.outputs.new_tag != ''
+        run: |
+          gh workflow run release-build.yml \
+            --repo ${{ github.repository }} \
+            --field tag=${{ steps.detect.outputs.new_tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
