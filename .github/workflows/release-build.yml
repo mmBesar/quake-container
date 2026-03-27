@@ -16,7 +16,7 @@ permissions:
 # AMD64 → upstream Docker build system → AppImage + tar.gz
 # ARM64 → native ubuntu-24.04-arm runner → tar.gz
 #
-# RISC-V: planned for future when board (Orange Pi RV2) arrives.
+# RISC-V build is not included yet — pending a confirmed working solution.
 # ===========================================================================
 
 jobs:
@@ -100,7 +100,10 @@ jobs:
           mv "$APPIMAGE" "vkquake-${TAG}-linux-amd64.AppImage"
 
           ls -la vkquake-${TAG}-*
-          mv vkquake-${TAG}-* ../../
+
+          # Move only the two renamed files — not the extracted folder
+          mv "vkquake-${TAG}-linux-amd64.tar.gz" ../../
+          mv "vkquake-${TAG}-linux-amd64.AppImage" ../../
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -231,7 +234,6 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           merge-multiple: true
-          pattern: release-*
 
       - name: List release files
         run: ls -la vkquake-*
