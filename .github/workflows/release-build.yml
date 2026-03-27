@@ -230,10 +230,15 @@ jobs:
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Download all artifacts
+      - name: Download AMD64 artifact
         uses: actions/download-artifact@v7
         with:
-          merge-multiple: true
+          name: release-amd64
+
+      - name: Download ARM64 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: release-arm64
 
       - name: List release files
         run: ls -la vkquake-*
