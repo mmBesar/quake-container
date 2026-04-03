@@ -1,0 +1,174 @@
+name: Build and Publish vkQuake Server Container
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag to build (e.g. 1.33.1)'
+        required: true
+        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile'
+      - 'entrypoint.sh'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/mmbesar/quake-container
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout main branch (Dockerfile, entrypoint.sh)
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Checkout upstream source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.image_tag || 'upstream' }}
+          path: upstream-src
+
+      - name: Prepare vkQuake source in build context
+        run: |
+          cp -r upstream-src/* .
+
+      - name: Download Frogbot (latest release)
+        run: |
+          # Fetch latest release info
+          RELEASE=$(curl -sf https://api.github.com/repos/DrLex0/quake-frogbots/releases/latest)
+          TAG=$(echo "$RELEASE" | jq -r '.tag_name')
+          DOWNLOAD_URL=$(echo "$RELEASE" | jq -r '.assets[0].browser_download_url')
+
+          echo "Fetching Frogbot $TAG"
+
+          # Download prebuilt progs archive
+          curl -sL "$DOWNLOAD_URL" -o frogbot-progs.tgz
+          tar -xzf frogbot-progs.tgz
+
+          # Clone repo at same tag for configs and sounds
+          git clone --depth 1 --branch "$TAG" https://github.com/DrLex0/quake-frogbots.git frogbot-repo
+
+          # Assemble frogbot/ directory for COPY in Dockerfile
+          mkdir -p frogbot
+          cp Release/quake/progs.dat        frogbot/
+          cp frogbot-repo/frogbot-quake.cfg frogbot/
+          cp -r frogbot-repo/configs-quake  frogbot/
+          cp -r frogbot-repo/sound          frogbot/
+
+          # autoexec.cfg loads frogbot config first
+          # entrypoint.sh then overrides with env vars via server.cfg
+          echo "exec frogbot-quake.cfg" > frogbot/autoexec.cfg
+
+          echo "Frogbot $TAG ready"
+          ls -la frogbot/
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push image by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: digest-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge and push multi-arch manifest
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - name: Download AMD64 digest
+        uses: actions/download-artifact@v7
+        with:
+          name: digest-amd64
+          path: /tmp/digests
+
+      - name: Download ARM64 digest
+        uses: actions/download-artifact@v7
+        with:
+          name: digest-arm64
+          path: /tmp/digests
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Generate tags
+        id: tags
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+
+          # Always include latest
+          TAGS="${{ env.IMAGE_NAME }}:latest"
+
+          # Add version and minor tags if semver
+          if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            MINOR=$(echo "$TAG" | cut -d. -f1,2)
+            TAGS="$TAGS,${{ env.IMAGE_NAME }}:${TAG},${{ env.IMAGE_NAME }}:${MINOR}"
+          fi
+
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "Generated tags: $TAGS"
+
+      - name: Create and push multi-arch manifest
+        run: |
+          DIGESTS=$(ls /tmp/digests | xargs -I{} echo "${{ env.IMAGE_NAME }}@sha256:{}")
+          TAG_ARGS=$(echo "${{ steps.tags.outputs.tags }}" | tr ',' '\n' | xargs -I{} echo "--tag {}" | tr '\n' ' ')
+          docker buildx imagetools create $TAG_ARGS $DIGESTS
+
+      - name: Inspect final manifest
+        run: |
+          docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:latest
